@@ -26,6 +26,9 @@ COPY --from=builder /install /usr/local
 # Copy application code
 COPY --chown=appuser:appuser app/ ./app/
 
+# Create router registry directory (written at runtime by the Web UI)
+RUN mkdir -p /app/data && chown appuser:appuser /app/data
+
 # Switch to non-root user
 USER appuser
 

@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZTE Router Console</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div>
+        <h1>
+          <span>⚡</span> ZTE Router Console
+        </h1>
+        <p style="color: var(--text-muted); font-size: 0.875rem;">
+          Multi-Router Monitor, PON Metrics & WiFi Credentials
+        </p>
+      </div>
+      <div class="header-links">
+        <a href="/docs" target="_blank" title="Buka dokumentasi Swagger API">
+          <span>📖</span> Swagger Docs
+        </a>
+        <a href="/openapi.json" target="_blank" title="OpenAPI 3.0 JSON Specification">
+          <span>📋</span> OpenAPI JSON
+        </a>
+      </div>
+    </header>
+
+    <!-- Global Notification Banner -->
+    <div id="alert-banner" class="alert" style="display:none">
+      <span id="alert-message"></span>
+      <button class="btn btn-sm" onclick="hideAlert()">Tutup</button>
+    </div>
+
+    <!-- Controls Bar -->
+    <div class="controls-card">
+      <div class="controls-left">
+        <label for="router-select">Pilih Router:</label>
+        <select id="router-select">
+          <option value="" disabled selected>Memuat daftar router...</option>
+        </select>
+        <span id="router-status-badge" class="badge badge-neutral">
+          <span class="dot dot-gray"></span> Menunggu...
+        </span>
+        <button id="btn-test-conn" class="btn btn-sm" title="Uji konektivitas ke router ini">
+          🔍 Uji Koneksi
+        </button>
+        <button id="btn-reauth" class="btn btn-sm" title="Paksa login ulang dan segarkan sesi router">
+          🔑 Re-Auth
+        </button>
+      </div>
+
+      <div class="controls-right">
+        <button id="btn-toggle-add" class="btn btn-sm btn-primary">
+          + Tambah Router
+        </button>
+        <button id="btn-edit-router" class="btn btn-sm">
+          ✏️ Edit
+        </button>
+        <button id="btn-delete-router" class="btn btn-sm btn-danger">
+          🗑️ Hapus
+        </button>
+        <div style="display:inline-flex; align-items:center; gap:0.4rem; margin-left:0.5rem;">
+          <label for="refresh-interval">Refresh:</label>
+          <select id="refresh-interval">
+            <option value="0">Manual</option>
+            <option value="10">10s</option>
+            <option value="30" selected>30s</option>
+            <option value="60">60s</option>
+          </select>
+          <button id="btn-refresh" class="btn btn-sm" title="Muat ulang data">
+            🔄
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Inline Router Management Form (NON-MODAL) -->
+    <div id="router-form-card" class="inline-form-card" style="display:none">
+      <h3 id="form-title">Tambah Router Baru</h3>
+      <form id="router-form" novalidate>
+        <input type="hidden" id="form-id">
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="form-name">Nama Router <span style="color:red">*</span></label>
+            <input type="text" id="form-name" placeholder="Mis. F609 Utama" required>
+          </div>
+          <div class="form-group">
+            <label for="form-host">Host / IP <span style="color:red">*</span></label>
+            <input type="text" id="form-host" placeholder="Mis. 192.168.20.1" required>
+          </div>
+          <div class="form-group">
+            <label for="form-port">Port</label>
+            <input type="number" id="form-port" value="80" min="1" max="65535">
+          </div>
+          <div class="form-group">
+            <label for="form-username">Username</label>
+            <input type="text" id="form-username" value="admin">
+          </div>
+          <div class="form-group">
+            <label for="form-password">Password</label>
+            <input type="password" id="form-password" placeholder="Kosongkan jika tidak diubah">
+          </div>
+          <div class="form-group">
+            <label for="form-timeout">Timeout (detik)</label>
+            <input type="number" id="form-timeout" value="10" min="1" max="120">
+          </div>
+          <div class="form-group">
+            <label for="form-location">Lokasi</label>
+            <input type="text" id="form-location" placeholder="Mis. Ruang Server / Kamar">
+          </div>
+          <div class="form-group">
+            <label for="form-notes">Catatan</label>
+            <input type="text" id="form-notes" placeholder="Catatan tambahan">
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" id="btn-save-router" class="btn btn-primary">Simpan Router</button>
+          <button type="button" id="btn-cancel-form" class="btn">Batal</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Inline Delete Confirmation (NON-MODAL) -->
+    <div id="delete-confirm-box" class="alert alert-danger" style="display:none; justify-content:space-between;">
+      <span id="delete-confirm-text">Yakin ingin menghapus router ini?</span>
+      <div style="display:flex; gap:0.5rem;">
+        <button id="btn-confirm-delete" class="btn btn-sm btn-danger">Ya, Hapus</button>
+        <button id="btn-cancel-delete" class="btn btn-sm">Batal</button>
+      </div>
+    </div>
+
+    <!-- Loading Indicator -->
+    <div id="loading-state" style="display:none; text-align:center; padding:2rem; color:var(--text-muted);">
+      ⏳ Memuat data router...
+    </div>
+
+    <!-- Main Content Area -->
+    <main id="main-content">
+      <!-- 1. WIFI NETWORKS HIGHLIGHT CARD -->
+      <section class="card" style="border-top: 4px solid var(--primary);">
+        <div class="card-header">
+          <h2><span>📶</span> Konfigurasi Jaringan WiFi</h2>
+          <span id="wifi-count-badge" class="badge badge-neutral">0 SSID</span>
+        </div>
+        <div class="card-body">
+          <div id="wifi-grid" class="wifi-grid">
+            <div style="color:var(--text-muted);">Memuat konfigurasi WiFi...</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. OPTICAL PON MODULE CARD -->
+      <section class="card">
+        <div class="card-header">
+          <h2><span>💡</span> Parameter Optik PON</h2>
+          <span id="pon-onu-badge" class="badge badge-neutral">Status: -</span>
+        </div>
+        <div class="card-body">
+          <div class="metrics-grid">
+            <div class="metric-tile">
+              <div class="metric-label">Rx Power (Daya Terima)</div>
+              <div class="metric-value" id="pon-rx-val">-<span class="metric-unit">dBm</span></div>
+              <small id="pon-rx-note" style="color:var(--text-muted); font-size:0.75rem;">Ambang ideal: &gt; -25 dBm</small>
+            </div>
+            <div class="metric-tile">
+              <div class="metric-label">Tx Power (Daya Kirim)</div>
+              <div class="metric-value" id="pon-tx-val">-<span class="metric-unit">dBm</span></div>
+            </div>
+            <div class="metric-tile">
+              <div class="metric-label">Suhu Modul</div>
+              <div class="metric-value" id="pon-temp-val">-<span class="metric-unit">°C</span></div>
+            </div>
+            <div class="metric-tile">
+              <div class="metric-label">Tegangan (Voltage)</div>
+              <div class="metric-value" id="pon-volt-val">-<span class="metric-unit">mV</span></div>
+            </div>
+            <div class="metric-tile">
+              <div class="metric-label">Arus Bias (Current)</div>
+              <div class="metric-value" id="pon-curr-val">-<span class="metric-unit">mA</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. DETAILED SECTIONS TABS -->
+      <div class="tabs-nav" id="section-tabs">
+        <button class="tab-btn active" data-tab="tab-overview">Ringkasan Perangkat</button>
+        <button class="tab-btn" data-tab="tab-wan">Koneksi WAN</button>
+        <button class="tab-btn" data-tab="tab-lan">Port LAN</button>
+        <button class="tab-btn" data-tab="tab-raw">Raw JSON</button>
+      </div>
+
+      <!-- Tab: Ringkasan Perangkat -->
+      <div id="tab-overview" class="tab-content active">
+        <div class="card">
+          <div class="card-header">
+            <h3><span>ℹ️</span> Informasi Perangkat & Firmware</h3>
+          </div>
+          <div class="card-body">
+            <div class="table-wrap">
+              <table class="kv-table">
+                <tbody>
+                  <tr><td>Model Perangkat</td><td id="dev-model">-</td></tr>
+                  <tr><td>Nomor Seri (Serial Number)</td><td id="dev-sn">-</td></tr>
+                  <tr><td>Versi Hardware</td><td id="dev-hw">-</td></tr>
+                  <tr><td>Versi Firmware / Software</td><td id="dev-sw">-</td></tr>
+                  <tr><td>Versi Bootloader</td><td id="dev-boot">-</td></tr>
+                  <tr><td>Alamat URL Router</td><td id="dev-url">-</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Koneksi WAN -->
+      <div id="tab-wan" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <h3><span>🌐</span> Antarmuka WAN</h3>
+          </div>
+          <div class="card-body">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Nama Koneksi</th>
+                    <th>Tipe</th>
+                    <th>Status</th>
+                    <th>Alamat IP</th>
+                    <th>Username PPPoE</th>
+                    <th>Password PPPoE</th>
+                    <th>Gateway</th>
+                    <th>DNS Server</th>
+                    <th>MAC Address</th>
+                  </tr>
+                </thead>
+                <tbody id="wan-tbody">
+                  <tr><td colspan="9" style="text-align:center; color:var(--text-muted);">Tidak ada koneksi WAN</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Port LAN -->
+      <div id="tab-lan" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <h3><span>🔌</span> Port LAN Fisik</h3>
+          </div>
+          <div class="card-body">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Port</th>
+                    <th>Status Link</th>
+                    <th>Kecepatan</th>
+                    <th>Duplex</th>
+                    <th>Rx Bytes</th>
+                    <th>Tx Bytes</th>
+                  </tr>
+                </thead>
+                <tbody id="lan-tbody">
+                  <tr><td colspan="6" style="text-align:center; color:var(--text-muted);">Tidak ada data LAN</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Raw JSON -->
+      <div id="tab-raw" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <h3><span>📜</span> Output JSON Lengkap (/routers/{id}/overview)</h3>
+          </div>
+          <div class="card-body">
+            <pre id="json-raw-content">Memuat data...</pre>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

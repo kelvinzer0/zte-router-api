@@ -38,6 +38,9 @@ env/
 .env.local
 .env.*.local
 
+# Router registry (contains router credentials)
+data/
+
 # Docker
 .docker/
 

@@ -1,378 +1,214 @@
-# ZTE F8648P Router API Server
+# ZTE Router OpenAPI & Multi-Router Management API Server
 
-A lightweight RESTful API server for ZTE F8648P GPON fiber routers. Provides programmatic access to router status, PON optical data, network configuration, and more.
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.142.2-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg?logo=python)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Read-Only](https://img.shields.io/badge/Safety-Read--Only%20Guaranteed-brightgreen.svg)]()
 
-## Features
+Server RESTful API dan Web UI konsol modern untuk manajemen dan pemantauan router fiber optik ZTE GPON (teruji pada **ZTE F609**, **ZTE F677V2**, dan **ZTE F8648P**).
 
-- **PON Optical Data** - RX/TX power, temperature, voltage, bias current
-- **Device Information** - Model, firmware, serial number, hardware version
-- **LAN Port Status** - Link state, speed, duplex, traffic counters
-- **VoIP Status** - Line registration status for all configured lines
-- **WAN Status** - Connection type, status, VLAN, traffic counters
-- **System Stats** - CPU usage, memory usage, uptime, flash storage
-- **Connected Devices** - List of devices connected to the router
-- **OpenAPI/Swagger** - Full interactive API documentation
+Menyediakan ekstraksi kredensial WiFi (SSID & Password), metrik modul optik PON (Rx/Tx power, suhu, voltase), status antarmuka LAN & WAN, serta manajemen banyak router (multi-router) tanpa perlu restart server atau edit file lingkungan manual.
 
-## Quick Start
+---
 
-### Using Docker Compose (Recommended)
+## Fitur Utama
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/zte-api-server.git
-   cd zte-api-server
-   ```
+- **Ekstraksi WiFi Lengkap**: Mengambil nama SSID, status aktif/nonaktif, tipe enkripsi/security, serta kata sandi (WPA/WPA2-PSK passphrase) yang terpasang pada router.
+- **Ekstraksi Kredensial PPPoE**: Mengambil Username dan Password PPPoE akun WAN Internet dari konfigurasi router untuk kemudahan pencatatan dan diagnostik teknisi (dilengkapi tombol salin).
+- **Konsol Web UI Non-Modal (`/ui`)**: Antarmuka bersih, cepat, responsif, dan non-modal (tanpa popup dialog yang mengganggu atau rusak). Dilengkapi tombol **Salin Password** sekali klik.
+- **Multi-Router Registry**: Daftarkan banyak router sekaligus dengan penyimpanan persisten `data/routers.json` (izin file aman `0600`).
+- **Mekanisme Re-Authentication Otomatis & Tombol Re-Auth**:
+  - Deteksi otomatis saat sesi router kedaluwarsa atau dialihkan ke halaman login (`ZTESessionError`), secara transparan melakukan login ulang tanpa perlu edit/simpan profil router.
+  - Endpoint eksplisit `POST /routers/{id}/reauth` dan tombol **🔑 Re-Auth** di Web UI untuk penyegaran sesi seketika.
+- **Metrik Optik PON Akurat**: Pembacaan Rx Power (dBm) dengan indikator ambang sinyal (Normal, Waspada, Kritis), Tx Power, suhu modul, tegangan supply, dan status registrasi ONU (O1-O5).
+- **Status Port LAN & Antarmuka WAN**: Link status (Up/Down), link speed, duplex mode, alamat IP WAN, Gateway, DNS, serta traffic byte counter.
+- **Dokumentasi OpenAPI 3.0 / Swagger Bersih (`/docs`)**: Schema query parameter telah dibersihkan dari `anyOf` schema null issues agar 100% patuh pada spesifikasi OpenAPI.
+- **Jaminan Read-Only Mutlak**: Tidak ada operasi penulisan atau pengubahan konfigurasi jaringan/WiFi ke perangkat router.
 
-2. Create your environment file:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your router credentials
-   ```
+---
 
-3. Start the server:
-   ```bash
-   docker compose up -d
-   ```
+## Arsitektur & Dukungan Perangkat
 
-4. Access the API:
-   - API: http://localhost:8000
-   - Swagger UI: http://localhost:8000/docs
-   - ReDoc: http://localhost:8000/redoc
+Sistem secara cerdas mendeteksi varian model router ZTE:
 
-### Using Docker
+| Model Router | Metode Otentikasi | Halaman Status GCH / Lua | Ekstraksi WiFi |
+| :--- | :--- | :--- | :--- |
+| **ZTE F609** | Form Login (MD5 + Salt) | `pon_status_lan_info_t.gch`, `IPv46_status_wan2_if_t.gch` | `status_wlanm_info1_t.gch` + `net_wlanm_secrity1_t.gch` |
+| **ZTE F677V2** | Form Login (SHA256 + Salt) | `status_lan_info_t.gch`, `status_ethwan_if_t.gch` | `pon_net_wlan_conf1_t.gch` (Multi-SSID & KeyPassphrase) |
+| **ZTE F8648P** | XML/Lua Token (SHA256) | `devmgr_statusmgr_lua.lua`, `status_lan_info_lua.lua` | API Lua session endpoints |
+
+---
+
+## Memulai Cepat
+
+### 1. Menjalankan Langsung (Python Virtualenv)
 
 ```bash
-docker build -t zte-api-server .
+# Clone repositori
+git clone https://github.com/kelvinzer0/zte-router-api.git
+cd zte-router-api
+
+# Buat virtual environment & install dependensi
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Jalankan server API
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Buka peramban di:
+- **Web Console UI**: [http://127.0.0.1:8000/ui](http://127.0.0.1:8000/ui) (atau [http://127.0.0.1:8000/](http://127.0.0.1:8000/))
+- **Dokumentasi Swagger API**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- **Spesifikasi OpenAPI JSON**: [http://127.0.0.1:8000/openapi.json](http://127.0.0.1:8000/openapi.json)
+
+### 2. Menggunakan Docker
+
+```bash
+docker build -t zte-router-api .
 
 docker run -d \
-  --name zte-api \
+  --name zte-router-api \
   -p 8000:8000 \
-  -e ZTE_HOST=192.168.178.1 \
-  -e ZTE_USERNAME=admin \
-  -e ZTE_PASSWORD=your_password \
-  zte-api-server
+  -v $(pwd)/data:/app/data \
+  zte-router-api
 ```
 
-### Running Locally
+---
 
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Mekanisme Re-Authentication & Manajemen Sesi
 
-2. Set environment variables:
-   ```bash
-   export ZTE_HOST=192.168.178.1
-   export ZTE_USERNAME=admin
-   export ZTE_PASSWORD=your_password
-   ```
+Sebelumnya, jika sesi router kedaluwarsa, pengguna mungkin merasa perlu melakukan "edit dan simpan" profil router agar client pool di-refresh. Masalah ini telah diselesaikan secara menyeluruh melalui 2 mekanisme:
 
-3. Run the server:
-   ```bash
-   uvicorn app.main:app --host 0.0.0.0 --port 8000
-   ```
+1. **Auto-Recovery on Session Expiry**:
+   Saat router ZTE memutus sesi (idle timeout), router mengalihkan request data ke halaman login (`Frm_Logintoken`). Client mendeteksi pengalihan ini sebagai `ZTESessionError`, otomatis menghapus token kedaluwarsa, mengeksekusi login ulang, dan mengulangi request data secara transparan tanpa intervensi pengguna.
+2. **Explicit Re-Auth (`POST /routers/{id}/reauth`)**:
+   Tersedia tombol **🔑 Re-Auth** di Web UI dan endpoint API untuk memaksa penghapusan cookie sesi lama dan melakukan otentikasi ulang baru ke router dalam hitungan milidetik.
 
-## Configuration
+---
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `ZTE_HOST` | `192.168.178.1` | Router IP address |
-| `ZTE_USERNAME` | `admin` | Router username |
-| `ZTE_PASSWORD` | `admin` | Router password |
-| `ZTE_TIMEOUT` | `10` | Request timeout in seconds |
+## Daftar Endpoint API
 
-## API Endpoints
+### Manajemen Multi-Router (`/routers`)
 
-### Authentication
+| Method | Endpoint | Deskripsi |
+| :--- | :--- | :--- |
+| `GET` | `/routers` | Daftar seluruh router yang terdaftar (tanpa mengekspos password). |
+| `POST` | `/routers` | Menambahkan router baru ke registri. |
+| `GET` | `/routers/{router_id}` | Mengambil detail konfigurasi satu router. |
+| `PUT` | `/routers/{router_id}` | Memperbarui router (kosongkan password untuk mempertahankan yang ada). |
+| `DELETE` | `/routers/{router_id}` | Menghapus router dari registri. |
+| `POST` | `/routers/{router_id}/test` | Uji konektivitas & otentikasi cepat dengan metrik latensi ms. |
+| `POST` | `/routers/{router_id}/reauth` | **Paksa login ulang** dan bersihkan sesi kedaluwarsa. |
+| `GET` | `/routers/{router_id}/overview` | Ringkasan terpadu (Device, PON, WiFi, LAN, WAN) dalam satu panggilan. |
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/login` | Authenticate with the router |
-| POST | `/logout` | End the router session |
+### Data Status & Ekstraksi Jaringan
 
-### Status
+Setiap endpoint di bawah menerima query parameter opsional `router_id` (misalnya `/wifi?router_id=5157737460f2`). Jika tidak disertakan, sistem menggunakan router default pertama.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Health check and router connectivity |
-| GET | `/status` | Full router status (all data) |
+| Method | Endpoint | Deskripsi |
+| :--- | :--- | :--- |
+| `GET` | `/wifi` | Mengambil daftar SSID, password WiFi, status aktif, dan keamanan. |
+| `GET` | `/pon` | Parameter modul optik PON (Rx/Tx power dBm, suhu, tegangan, arus bias). |
+| `GET` | `/device` | Model perangkat, nomor seri (SN), versi hardware & firmware. |
+| `GET` | `/lan` | Status port LAN fisik (Link Up/Down, kecepatan Mbps, duplex, byte counter). |
+| `GET` | `/wan` | Informasi koneksi WAN (PPPoE/DHCP, IP Address, Gateway, DNS, MAC) beserta kredensial PPPoE (`username`, `password`). |
+| `GET` | `/health` | Health check API server & status keterhubungan router. |
+| `GET` | `/status` | Seluruh data diagnostik mentah router. |
+| `POST` | `/reauth` | Otentikasi ulang instan untuk router target. |
+| `POST` | `/login` | Otentikasi manual router. |
+| `POST` | `/logout` | Mengakhiri sesi router. |
 
-### PON
+---
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/pon` | PON optical module data |
+## Contoh Penggunaan (cURL & Python)
 
-**Response Example:**
-```json
-{
-  "onu_state": "Operation State (O5)",
-  "rx_power_dbm": -14.78,
-  "tx_power_dbm": 6.02,
-  "voltage_mv": 3218,
-  "current_ma": 35.48,
-  "temperature_c": 52.57
-}
+### 1. Ekstraksi WiFi (SSID & Password)
+
+```bash
+curl -s "http://127.0.0.1:8000/wifi?router_id=5157737460f2"
 ```
 
-### Device
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/device` | Device information |
-
-**Response Example:**
-```json
-{
-  "model": "F8648P",
-  "serial_number": "ZTEXXXXXXXXXXX",
-  "hardware_version": "V2.0",
-  "software_version": "V2.0.12P1N15H",
-  "boot_version": "V2.0.12P10N5",
-  "manufacturer": "ZTE"
-}
-```
-
-### Network
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/lan` | LAN port status |
-| GET | `/wan` | WAN connection status |
-| GET | `/devices` | Connected devices list |
-
-**WAN Response Example:**
-```json
-{
-  "name": "Cosmote_Internet",
-  "connection_type": "PPPoE",
-  "status": "Connected",
-  "tx_bytes": 273744815,
-  "rx_bytes": 1146284273,
-  "vlan_id": 835,
-  "mac_address": "00:11:22:33:44:55"
-}
-```
-
-**Connected Devices Response Example:**
+**Contoh Output:**
 ```json
 [
   {
-    "ip_address": "192.168.178.200",
-    "mac_address": "aa:bb:cc:dd:ee:ff",
-    "interface": "LAN1",
-    "last_seen": "2025-12-24 09:17:49"
+    "ssid": "ZTE_2.4G_UTRnDz",
+    "password": "Wl098765_",
+    "enabled": true,
+    "band": "2.4G",
+    "security": "WPA/WPA2-PSK"
   }
 ]
 ```
 
-### VoIP
+### 2. Ekstraksi Koneksi WAN & Akun PPPoE
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/voip` | VoIP line registration status |
+```bash
+curl -s "http://127.0.0.1:8000/wan?router_id=52d8b02611c4"
+```
 
-### System
+**Contoh Output:**
+```json
+[
+  {
+    "name": "2_INTERNET_R_VID_1",
+    "connection_type": "PPPoE",
+    "status": "Connected",
+    "ip_address": "10.200.204.1",
+    "gateway": "10.200.192.1",
+    "dns_servers": "10.200.192.1",
+    "mac_address": "f4:b5:aa:54:ca:eb",
+    "username": "nurWahidUD@indo.net",
+    "password": "******"
+  }
+]
+```
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/system/stats` | CPU, memory, uptime, storage stats |
+### 3. Membaca Metrik Optik PON
 
-**System Stats Response Example:**
+```bash
+curl -s "http://127.0.0.1:8000/pon?router_id=52d8b02611c4"
+```
+
+**Contoh Output:**
 ```json
 {
-  "cpu_usage": 1,
-  "memory_usage": 62,
-  "uptime_seconds": 3022841,
-  "flash_used_percent": 71
+  "onu_state": "Operation State (O5)",
+  "rx_power_dbm": -18.32,
+  "tx_power_dbm": 2.29,
+  "voltage_mv": 3274,
+  "current_ma": 15.91,
+  "temperature_c": 53.0
 }
 ```
 
-## Usage Examples
-
-### curl
+### 3. Menguji Koneksi & Re-Auth
 
 ```bash
-# Get PON optical data
-curl http://localhost:8000/pon
+# Uji koneksi
+curl -X POST "http://127.0.0.1:8000/routers/52d8b02611c4/test"
 
-# Get full status (all data in one request)
-curl http://localhost:8000/status
-
-# Get system stats (CPU, memory, uptime)
-curl http://localhost:8000/system/stats
-
-# Get connected devices
-curl http://localhost:8000/devices
-
-# Get WAN connection info
-curl http://localhost:8000/wan
-
-# Login first (if needed)
-curl -X POST http://localhost:8000/login
+# Paksa re-auth
+curl -X POST "http://127.0.0.1:8000/routers/52d8b02611c4/reauth"
 ```
 
-### Python
+---
 
-```python
-import requests
+## Konfigurasi File Lingkungan (Fallback Default)
 
-BASE_URL = "http://localhost:8000"
+Bila direktori `data/routers.json` belum diisi, server dapat membaca konfigurasi router bawaan dari environment:
 
-# Login
-requests.post(f"{BASE_URL}/login")
+| Variabel Lingkungan | Nilai Bawaan | Keterangan |
+| :--- | :--- | :--- |
+| `ZTE_HOST` | `192.168.178.1` | Alamat IP atau hostname router |
+| `ZTE_USERNAME` | `admin` | Username web admin router |
+| `ZTE_PASSWORD` | `admin` | Password web admin router |
+| `ZTE_TIMEOUT` | `10` | Timeout koneksi dalam detik |
+| `ZTE_ROUTERS_FILE` | `data/routers.json` | Lokasi berkas penyimpanan database router |
 
-# Get PON data
-pon = requests.get(f"{BASE_URL}/pon").json()
-print(f"RX Power: {pon['rx_power_dbm']} dBm")
-print(f"TX Power: {pon['tx_power_dbm']} dBm")
+---
 
-# Get system stats
-stats = requests.get(f"{BASE_URL}/system/stats").json()
-print(f"CPU: {stats['cpu_usage']}%, Memory: {stats['memory_usage']}%")
-print(f"Uptime: {stats['uptime_seconds'] // 86400} days")
+## Lisensi
 
-# Get connected devices
-devices = requests.get(f"{BASE_URL}/devices").json()
-for device in devices:
-    print(f"Device: {device['ip_address']} on {device['interface']}")
-
-# Get full status (all data in one request)
-status = requests.get(f"{BASE_URL}/status").json()
-print(f"Device: {status['device']['model']}")
-print(f"WAN: {status['wan'][0]['status'] if status['wan'] else 'N/A'}")
-```
-
-### JavaScript
-
-```javascript
-const BASE_URL = 'http://localhost:8000';
-
-// Get PON data
-const response = await fetch(`${BASE_URL}/pon`);
-const ponData = await response.json();
-console.log(`RX Power: ${ponData.rx_power_dbm} dBm`);
-```
-
-## Technical Details
-
-### Authentication
-
-The ZTE F8648P uses SHA256 token-based authentication:
-
-1. Client requests a login token from the router
-2. Password is hashed: `SHA256(password + token)`
-3. Hash is sent to router for authentication
-4. Session is maintained via cookies
-
-### API Notes
-
-- The server handles router authentication automatically
-- Sessions expire after inactivity; the server re-authenticates as needed
-- Rate limiting may apply from the router side
-- CORS is enabled for all origins (configurable in production)
-
-### Router API Structure
-
-The router uses XML-based responses with two main request types:
-- `menuView` - Load page views (required before fetching data)
-- `menuData` - Fetch actual data from Lua modules
-
-## Health Monitoring
-
-The Docker container includes a health check that verifies:
-- API server is running
-- Router connectivity status
-
-```bash
-# Check container health
-docker inspect --format='{{.State.Health.Status}}' zte-api
-```
-
-## Development
-
-### Project Structure
-
-```
-zte-api-server/
-├── app/
-│   ├── __init__.py
-│   ├── main.py          # FastAPI application
-│   └── zte_client.py    # ZTE router client library
-├── examples/
-│   └── dashboard/       # Example dashboard application
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-├── .env.example
-├── .gitignore
-└── README.md
-```
-
-## Examples
-
-### Dashboard
-
-A ready-to-use dashboard displaying PON optical metrics and LAN port status.
-
-```bash
-cd examples/dashboard
-
-# Create .env with your router credentials
-cp .env.example .env
-# Edit .env with your settings
-
-# Start with Docker Compose
-docker compose up -d
-
-# Open http://localhost:8080
-```
-
-See [examples/dashboard/README.md](examples/dashboard/README.md) for details.
-
-### Running Tests
-
-```bash
-# Install dev dependencies
-pip install pytest httpx
-
-# Run tests
-pytest
-```
-
-### Building Docker Image
-
-```bash
-docker build -t zte-api-server:latest .
-```
-
-## Troubleshooting
-
-### "Router unavailable" error
-
-- Verify the router IP is correct and reachable
-- Check if another session is active on the router
-- Wait a few minutes if rate limiting is active
-
-### "Authentication failed" error
-
-- Verify username and password
-- Check if the account is locked due to failed attempts
-
-### Session timeout errors
-
-- The server automatically re-authenticates
-- If persistent, restart the container
-
-## License
-
-MIT License
-
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request.
-
-## Acknowledgments
-
-- ZTE F8648P router API reverse-engineering community
-- FastAPI framework
+Proyek ini dilisensikan di bawah [MIT License](LICENSE).
