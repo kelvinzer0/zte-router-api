@@ -523,14 +523,14 @@ class ZTEClient:
         self.session_token = None
         return self.login()
 
-    def _request_raw(self, path: str, retries: int = 1) -> Optional[bytes]:
+    def _request_raw(self, path: str, retries: int = 3) -> Optional[bytes]:
         url = f"{self.base_url}{path}"
-        req = Request(url, method="GET")
-        req.add_header("User-Agent", "Mozilla/5.0")
-        req.add_header("Referer", self.base_url)
-        req.add_header("Connection", "close")
         for attempt in range(retries + 1):
             try:
+                req = Request(url, method="GET")
+                req.add_header("User-Agent", "Mozilla/5.0")
+                req.add_header("Referer", self.base_url)
+                req.add_header("Connection", "close")
                 with self.opener.open(req, timeout=self.timeout) as response:
                     data = response.read()
                     # If redirected to login page while expecting data, session expired
@@ -546,29 +546,29 @@ class ZTEClient:
                 raise
             except Exception as e:
                 err_str = str(e).lower()
-                if attempt < retries and ("remote end closed" in err_str or "connection reset" in err_str or "broken pipe" in err_str):
-                    time.sleep(0.3)
+                if attempt < retries and ("remote end closed" in err_str or "connection reset" in err_str or "broken pipe" in err_str or "timed out" in err_str):
+                    time.sleep(0.4 * (attempt + 1))
                     continue
                 raise ZTEClientError(f"Request failed: {e}")
 
-    def _post_raw(self, path: str, data: dict, referer: Optional[str] = None, retries: int = 1) -> Optional[bytes]:
+    def _post_raw(self, path: str, data: dict, referer: Optional[str] = None, retries: int = 3) -> Optional[bytes]:
         url = f"{self.base_url}{path}"
         encoded_data = urlencode(data).encode('utf-8')
-        req = Request(url, data=encoded_data, method="POST")
-        req.add_header("Content-Type", "application/x-www-form-urlencoded")
-        req.add_header("User-Agent", "Mozilla/5.0")
-        req.add_header("Connection", "close")
-        if referer:
-            req.add_header("Referer", referer)
-        req.add_header("Origin", self.base_url)
         for attempt in range(retries + 1):
             try:
+                req = Request(url, data=encoded_data, method="POST")
+                req.add_header("Content-Type", "application/x-www-form-urlencoded")
+                req.add_header("User-Agent", "Mozilla/5.0")
+                req.add_header("Connection", "close")
+                if referer:
+                    req.add_header("Referer", referer)
+                req.add_header("Origin", self.base_url)
                 with self.opener.open(req, timeout=self.timeout) as response:
                     return response.read()
             except Exception as e:
                 err_str = str(e).lower()
-                if attempt < retries and ("remote end closed" in err_str or "connection reset" in err_str or "broken pipe" in err_str):
-                    time.sleep(0.3)
+                if attempt < retries and ("remote end closed" in err_str or "connection reset" in err_str or "broken pipe" in err_str or "timed out" in err_str):
+                    time.sleep(0.4 * (attempt + 1))
                     continue
                 raise ZTEClientError(f"Request failed: {e}")
 
@@ -1157,14 +1157,64 @@ class ZTEClient:
 
     def get_connected_devices(self) -> list[ConnectedDevice]:
         """
-        Fetch list of connected devices.
+        Fetch list of connected DHCP client devices (MAC, IP, HostName, Interface, LeaseTime).
 
         Returns:
             List of ConnectedDevice objects
         """
-        if self.is_gch_device:
-            return []
+        import html as _html
 
+        def _unescape(val: str) -> str:
+            if not val:
+                return ""
+            val = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), val)
+            return _html.unescape(val).strip()
+
+        # Branch 1: GCH devices (F677V2, F477V2, F609)
+        if self.is_gch_device:
+            devices: list[ConnectedDevice] = []
+            pages_to_try = [
+                "/getpage.gch?pid=1002&nextpage=status_lan_info_t.gch",
+                "/getpage.gch?pid=1002&nextpage=net_dhcp_dynamic_t.gch",
+            ]
+            for page_url in pages_to_try:
+                try:
+                    body = self._request_raw(page_url)
+                    if not body or len(body) < 1000:
+                        continue
+                    txt = body.decode("latin1", "replace")
+                    transfer_calls = re.findall(r"Transfer_meaning\('([^']+)',\s*'([^']*)'\);", txt)
+                    from collections import defaultdict
+                    grouped = defaultdict(dict)
+                    for key, val in transfer_calls:
+                        m = re.match(r"([A-Za-z_]+)(\d+)$", key)
+                        if m:
+                            field_name, idx = m.group(1), int(m.group(2))
+                            grouped[idx][field_name] = _unescape(val)
+
+                    if grouped:
+                        for idx in sorted(grouped.keys()):
+                            data = grouped[idx]
+                            mac = data.get("MACAddr") or data.get("MACAddress") or data.get("mac")
+                            ip = data.get("IPAddr") or data.get("IPAddress") or data.get("ip")
+                            hostname = data.get("HostName") or data.get("hostname") or ""
+                            phy = data.get("PhyPortName") or data.get("Interface") or ""
+                            expired = data.get("ExpiredTime") or data.get("LeaseTime") or ""
+                            if mac and ip and mac != "00:00:00:00:00:00":
+                                devices.append(ConnectedDevice(
+                                    ip_address=ip,
+                                    mac_address=mac,
+                                    hostname=hostname if hostname else None,
+                                    interface=phy if phy else None,
+                                    last_seen=f"Lease: {expired}s" if expired else None,
+                                ))
+                        if devices:
+                            break
+                except Exception:
+                    continue
+            return devices
+
+        # Branch 2: JSON / Lua API devices (F8648P)
         # Load homepage view first
         if not self._load_view("homePage"):
             raise ZTESessionError("Failed to load home page view")
@@ -1195,7 +1245,6 @@ class ZTEClient:
             data = self._parse_xml_params(instance, patterns)
 
             if data.get("ip") and data.get("mac"):
-                # Clean up HTML entities in last_seen
                 last_seen = data.get("last_seen", "")
                 if last_seen:
                     last_seen = last_seen.replace("&#32;", " ")

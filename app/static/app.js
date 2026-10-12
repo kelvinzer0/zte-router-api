@@ -335,7 +335,20 @@ async function handleReauthAll() {
   let offlineCount = 0;
   let failedCount = 0;
   let processedCount = 0;
+  let totalClientsCount = 0;
   let hasRows = false;
+  let brandStats = {};
+  let hostnameStats = {};
+  let allCollectedClients = [];
+
+  // Reset pie chart and analytics panel
+  drawReauthPieChart({}, 0);
+  if ($('#reauth-brand-legend-tbody')) {
+    $('#reauth-brand-legend-tbody').innerHTML = '<tr><td colspan="3" style="padding:1rem; text-align:center; color:var(--text-muted);">Sedang menghitung client dari router...</td></tr>';
+  }
+  if ($('#reauth-hostnames-tbody')) {
+    $('#reauth-hostnames-tbody').innerHTML = '<tr><td colspan="2" style="padding:1rem; text-align:center; color:var(--text-muted);">Sedang mendeteksi hostname...</td></tr>';
+  }
 
   try {
     const resp = await fetch('/routers/reauth-all-stream', {
@@ -345,6 +358,7 @@ async function handleReauthAll() {
         concurrency: 10,
         timeout_sec: 6.0,
         fetch_ssid: true,
+        fetch_clients: true,
       }),
       signal: signal,
     });
@@ -392,6 +406,22 @@ async function handleReauthAll() {
             if (item.status === 'ok') {
               successCount++;
               if (item.ssid) ssidFoundCount++;
+              const clients = item.clients || [];
+              totalClientsCount += clients.length;
+              for (const c of clients) {
+                allCollectedClients.push({
+                  router_ip: item.ip,
+                  router_name: item.name,
+                  router_model: item.model,
+                  ssid: item.ssid,
+                  ...c
+                });
+                const b = c.brand || 'Tanpa Hostname';
+                brandStats[b] = (brandStats[b] || 0) + 1;
+                if (c.hostname) {
+                  hostnameStats[c.hostname] = (hostnameStats[c.hostname] || 0) + 1;
+                }
+              }
             } else if (item.status === 'offline') {
               offlineCount++;
             } else {
@@ -400,9 +430,16 @@ async function handleReauthAll() {
 
             if ($('#reauth-stat-processed')) $('#reauth-stat-processed').textContent = `Diproses: ${processedCount}`;
             $('#reauth-stat-success').textContent = `✓ Berhasil: ${successCount}`;
-            if ($('#reauth-stat-ssid')) $('#reauth-stat-ssid').textContent = `📶 SSID Ditemukan: ${ssidFoundCount}`;
+            if ($('#reauth-stat-ssid')) $('#reauth-stat-ssid').textContent = `📶 SSID: ${ssidFoundCount}`;
+            if ($('#reauth-stat-clients')) $('#reauth-stat-clients').textContent = `📱 Perangkat Client: ${totalClientsCount}`;
             $('#reauth-stat-offline').textContent = `✕ Offline: ${offlineCount}`;
             $('#reauth-stat-failed').textContent = `⚠️ Gagal: ${failedCount}`;
+
+            // Update pie chart and tables live every few items or when clients found
+            if (item.client_count > 0 || processedCount % 5 === 0) {
+              drawReauthPieChart(brandStats, totalClientsCount);
+              renderReauthAnalyticsTables(brandStats, hostnameStats, totalClientsCount);
+            }
 
             // Append row to live progress table
             if (tbody) {
@@ -431,6 +468,10 @@ async function handleReauthAll() {
                 ? `<span class="badge" style="background:#e0f2fe; color:#0369a1; font-size:0.75rem;">ZTE ${esc(item.model)}</span>`
                 : '';
 
+              const clientsBadge = item.client_count > 0
+                ? `<span class="badge" style="background:#dbeafe; color:#1e40af; font-weight:700;">📱 ${item.client_count} device</span>`
+                : `<span style="color:var(--text-muted); font-size:0.8rem;">0</span>`;
+
               const latHtml = item.latency_ms
                 ? `<span style="font-family:monospace; color:var(--text-muted);">${item.latency_ms}ms</span>`
                 : `<span style="color:var(--text-muted); font-size:0.8rem;">${esc(item.message || '-')}</span>`;
@@ -447,6 +488,7 @@ async function handleReauthAll() {
                 </td>
                 <td style="padding:0.5rem 0.75rem;">${statusBadge}</td>
                 <td style="padding:0.5rem 0.75rem;">${ssidHtml}</td>
+                <td style="padding:0.5rem 0.75rem;">${clientsBadge}</td>
                 <td style="padding:0.5rem 0.75rem;">${latHtml}</td>
               `;
               tbody.appendChild(tr);
@@ -461,6 +503,17 @@ async function handleReauthAll() {
             $('#reauth-all-status-text').textContent = `✅ ${esc(ev.message)}`;
             $('#reauth-all-bar').style.width = '100%';
             $('#reauth-all-badge').textContent = `${ev.total} / ${ev.total} Router (100%)`;
+            if (ev.total_clients !== undefined) {
+              totalClientsCount = ev.total_clients;
+            }
+            if (ev.client_analytics?.brands) {
+              brandStats = ev.client_analytics.brands;
+            }
+            if (ev.client_analytics?.top_hostnames) {
+              hostnameStats = ev.client_analytics.top_hostnames;
+            }
+            drawReauthPieChart(brandStats, totalClientsCount);
+            renderReauthAnalyticsTables(brandStats, hostnameStats, totalClientsCount);
             showAlert(ev.message, false);
           }
         } catch (_) {}
@@ -480,6 +533,7 @@ async function handleReauthAll() {
     if (stopBtn) stopBtn.style.display = 'none';
     if (btnReauthAll) btnReauthAll.disabled = false;
     reauthAllAbortController = null;
+    state.collectedClients = allCollectedClients;
   }
 }
 
@@ -500,8 +554,194 @@ function renderOverview(data) {
   // 5. LAN Ports
   renderLAN(data.lan || []);
 
-  // 6. Raw JSON
+  // 6. Connected DHCP Clients
+  renderClients(data.devices || []);
+
+  // 7. Raw JSON
   $('#json-raw-content').textContent = JSON.stringify(data, null, 2);
+}
+
+function renderClients(clientList) {
+  const tbody = $('#clients-tbody');
+  const countBadge = $('#single-clients-count-badge');
+  const count = clientList ? clientList.length : 0;
+  if (countBadge) countBadge.textContent = `${count} Klien`;
+
+  if (!clientList || clientList.length === 0) {
+    if (tbody) tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:1.25rem;">Tidak ada perangkat terhubung (DHCP) terdeteksi pada router ini</td></tr>';
+    return;
+  }
+
+  if (tbody) {
+    tbody.innerHTML = clientList
+      .map((c) => {
+        const ip = c.ip_address || '-';
+        const mac = c.mac_address || '-';
+        const hn = c.hostname ? esc(c.hostname) : '<em style="color:var(--text-muted);">Tanpa Nama</em>';
+        const iface = c.interface ? `<span class="badge badge-neutral">${esc(c.interface)}</span>` : '-';
+        const lease = c.last_seen ? esc(c.last_seen) : '-';
+        const brand = classifyDeviceBrand(c.hostname, c.mac_address);
+
+        return `
+          <tr>
+            <td style="font-family:monospace; font-weight:700;">${esc(ip)}</td>
+            <td style="font-family:monospace; color:var(--text-muted);">${esc(mac)}</td>
+            <td><strong>${hn}</strong></td>
+            <td><span class="badge" style="background:#e0f2fe; color:#0369a1; font-weight:600;">${esc(brand)}</span></td>
+            <td>${iface}</td>
+            <td style="color:var(--text-muted); font-size:0.85rem;">${lease}</td>
+          </tr>
+        `;
+      })
+      .join('');
+  }
+}
+
+function classifyDeviceBrand(hostname, mac) {
+  const hn = (hostname || '').toLowerCase().trim();
+  if (hn.includes('oppo')) return 'OPPO';
+  if (hn.includes('realme')) return 'Realme';
+  if (['redmi', 'xiaomi', 'poco', 'mi '].some(k => hn.includes(k))) return 'Xiaomi / Redmi / POCO';
+  if (['galaxy', 'samsung'].some(k => hn.includes(k))) return 'Samsung';
+  if (hn.includes('vivo') || hn.includes('iqoo') || hn.startsWith('v2') || hn.startsWith('i2')) return 'Vivo / iQOO';
+  if (['infinix', 'tecno', 'itel'].some(k => hn.includes(k))) return 'Infinix / Transsion';
+  if (['iphone', 'ipad', 'apple', 'macbook'].some(k => hn.includes(k))) return 'Apple (iOS/macOS)';
+  if (['desktop', 'laptop', 'windows', 'pc-'].some(k => hn.includes(k))) return 'PC / Laptop Windows';
+  if (['tenda', 'tp-link', 'totolink', 'mercusys', 'router', 'cpe', 'ap-'].some(k => hn.includes(k))) return 'Router / Extender';
+  if (['tv', 'android', 'stb', 'box'].some(k => hn.includes(k))) return 'Smart TV / Android Box';
+  if (['aliosthings', 'tuya', 'esp_', 'esp32', 'esp8266', 'iot', 'cam', 'ipc-'].some(k => hn.includes(k))) return 'IoT / IP Cam / Smart Home';
+  if (hn) return `Lainnya (${hostname})`;
+  return 'Tanpa Hostname';
+}
+
+const PIE_COLORS = [
+  '#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
+  '#06b6d4', '#ec4899', '#f97316', '#14b8a6', '#6366f1',
+  '#84cc16', '#a855f7', '#64748b', '#0284c7', '#d97706',
+];
+
+function drawReauthPieChart(brandData, totalCount) {
+  const canvas = $('#reauth-pie-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+
+  const totalBadge = $('#reauth-pie-total-badge');
+  if (totalBadge) {
+    totalBadge.textContent = `Total Client: ${totalCount} Perangkat`;
+  }
+
+  const entries = Object.entries(brandData || {}).filter(([_, count]) => count > 0);
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const radius = Math.min(centerX, centerY) - 10;
+  const innerRadius = radius * 0.52; // Donut style
+
+  if (totalCount === 0 || entries.length === 0) {
+    // Draw empty placeholder ring
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+    ctx.arc(centerX, centerY, innerRadius, 2 * Math.PI, 0, true);
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fill();
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('0 Client', centerX, centerY);
+    return;
+  }
+
+  // Sort slices from largest to smallest
+  entries.sort((a, b) => b[1] - a[1]);
+
+  let startAngle = -0.5 * Math.PI; // Start at 12 o'clock
+  entries.forEach(([brand, count], idx) => {
+    const sliceAngle = (count / totalCount) * 2 * Math.PI;
+    const endAngle = startAngle + sliceAngle;
+    const color = PIE_COLORS[idx % PIE_COLORS.length];
+
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, startAngle, endAngle);
+    ctx.arc(centerX, centerY, innerRadius, endAngle, startAngle, true);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#ffffff';
+    ctx.stroke();
+
+    startAngle = endAngle;
+  });
+
+  // Inner circle text
+  ctx.fillStyle = '#0f172a';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${totalCount}`, centerX, centerY - 8);
+
+  ctx.fillStyle = '#64748b';
+  ctx.font = '10px sans-serif';
+  ctx.fillText('Perangkat', centerX, centerY + 12);
+}
+
+function renderReauthAnalyticsTables(brandData, hostData, totalCount) {
+  const brandTbody = $('#reauth-brand-legend-tbody');
+  const hostTbody = $('#reauth-hostnames-tbody');
+
+  if (brandTbody) {
+    const brandEntries = Object.entries(brandData || {}).filter(([_, count]) => count > 0);
+    brandEntries.sort((a, b) => b[1] - a[1]);
+
+    if (brandEntries.length === 0) {
+      brandTbody.innerHTML = '<tr><td colspan="3" style="padding:1rem; text-align:center; color:var(--text-muted);">Belum ada data merek terhitung</td></tr>';
+    } else {
+      brandTbody.innerHTML = brandEntries
+        .map(([brand, count], idx) => {
+          const color = PIE_COLORS[idx % PIE_COLORS.length];
+          const pct = totalCount ? Math.round((count / totalCount) * 100) : 0;
+          return `
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:0.4rem 0.6rem; width:20px;">
+                <span style="display:inline-block; width:12px; height:12px; border-radius:3px; background:${color}; vertical-align:middle;"></span>
+              </td>
+              <td style="padding:0.4rem 0.6rem; font-weight:600; color:var(--text-main);">${esc(brand)}</td>
+              <td style="padding:0.4rem 0.6rem; text-align:right;">
+                <span style="font-weight:700;">${count}</span>
+                <span style="color:var(--text-muted); font-size:0.78rem; margin-left:4px;">(${pct}%)</span>
+              </td>
+            </tr>
+          `;
+        })
+        .join('');
+    }
+  }
+
+  if (hostTbody) {
+    const hostEntries = Object.entries(hostData || {}).filter(([_, count]) => count > 0);
+    hostEntries.sort((a, b) => b[1] - a[1]);
+
+    if (hostEntries.length === 0) {
+      hostTbody.innerHTML = '<tr><td colspan="2" style="padding:1rem; text-align:center; color:var(--text-muted);">Belum ada hostname terdeteksi</td></tr>';
+    } else {
+      hostTbody.innerHTML = hostEntries.slice(0, 25)
+        .map(([hostname, count]) => {
+          return `
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:0.4rem 0.6rem; font-weight:600; font-family:monospace; color:var(--text-main);">${esc(hostname)}</td>
+              <td style="padding:0.4rem 0.6rem; text-align:right;">
+                <span class="badge" style="background:#e0f2fe; color:#0369a1; font-weight:700;">${count} unit</span>
+              </td>
+            </tr>
+          `;
+        })
+        .join('');
+    }
+  }
 }
 
 function renderWiFi(wifiList) {
@@ -1515,6 +1755,24 @@ function initEvents() {
   $('#btn-export-all-wifi-csv')?.addEventListener('click', handleBackupCsvAll);
   $('#btn-export-single-wifi-csv')?.addEventListener('click', handleBackupCsvSingle);
 
+  // Client Analytics & Export Handlers
+  $('#btn-toggle-reauth-analytics')?.addEventListener('click', () => {
+    const panel = $('#reauth-analytics-panel');
+    if (!panel) return;
+    const isHidden = panel.style.display === 'none';
+    panel.style.display = isHidden ? 'block' : 'none';
+    $('#btn-toggle-reauth-analytics').textContent = isHidden
+      ? '📊 Sembunyikan Laporan Analitik'
+      : '📊 Tampilkan Laporan Analitik Client';
+  });
+
+  $('#btn-export-clients-csv')?.addEventListener('click', exportAllClientsCsv);
+  $('#btn-refresh-clients')?.addEventListener('click', () => {
+    if (state.selectedId) {
+      refreshRouterData();
+    }
+  });
+
   // SSID Search listeners
   $('#btn-toggle-search-ssid')?.addEventListener('click', toggleSsidSearchPanel);
   $('#btn-close-ssid-search')?.addEventListener('click', closeSsidSearchPanel);
@@ -1943,6 +2201,47 @@ async function handleRunTelnetCmd() {
   } catch (err) {
     term.textContent = `Error: ${err.message}`;
   }
+}
+
+// Export All Discovered DHCP Clients to CSV
+function exportAllClientsCsv() {
+  const clients = state.collectedClients || [];
+  if (clients.length === 0) {
+    showAlert('Belum ada data perangkat client yang terkumpul dari re-auth massal.', true);
+    return;
+  }
+
+  const csvRows = [
+    ['"No"', '"IP Router"', '"Nama Router"', '"Model"', '"SSID"', '"IP Client"', '"MAC Address"', '"Hostname / Perangkat"', '"Merek / Kategori"', '"Interface"', '"Waktu Sewa (Lease)"'].join(',')
+  ];
+
+  clients.forEach((c, idx) => {
+    csvRows.push([
+      idx + 1,
+      `"${(c.router_ip || '').replace(/"/g, '""')}"`,
+      `"${(c.router_name || '').replace(/"/g, '""')}"`,
+      `"${(c.router_model || '').replace(/"/g, '""')}"`,
+      `"${(c.ssid || '').replace(/"/g, '""')}"`,
+      `"${(c.ip || c.ip_address || '').replace(/"/g, '""')}"`,
+      `"${(c.mac || c.mac_address || '').replace(/"/g, '""')}"`,
+      `"${(c.hostname || '').replace(/"/g, '""')}"`,
+      `"${(c.brand || classifyDeviceBrand(c.hostname, c.mac)).replace(/"/g, '""')}"`,
+      `"${(c.interface || '').replace(/"/g, '""')}"`,
+      `"${(c.last_seen || '').replace(/"/g, '""')}"`,
+    ].join(','));
+  });
+
+  const blob = new Blob([csvRows.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const now = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  a.href = url;
+  a.download = `zte_all_dhcp_clients_${now}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showAlert(`Berhasil mengekspor ${clients.length} perangkat client ke CSV!`, false);
 }
 
 // Initialization

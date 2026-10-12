@@ -137,12 +137,16 @@
         <span id="reauth-stat-processed" class="badge badge-neutral">Diproses: 0</span>
         <span id="reauth-stat-success" class="badge badge-online" style="font-weight:700; background:#dcfce7; color:#15803d;">✓ Berhasil: 0</span>
         <span id="reauth-stat-ssid" class="badge badge-neutral" style="font-weight:700; background:#ede9fe; color:#6d28d9;">📶 SSID Ditemukan: 0</span>
+        <span id="reauth-stat-clients" class="badge badge-neutral" style="font-weight:700; background:#e0f2fe; color:#0369a1;">📱 Perangkat Client: 0</span>
         <span id="reauth-stat-offline" class="badge badge-offline" style="background:#fee2e2; color:#991b1b;">✕ Offline: 0</span>
         <span id="reauth-stat-failed" class="badge badge-warn" style="background:#fef3c7; color:#92400e;">⚠️ Gagal: 0</span>
+        <button type="button" id="btn-toggle-reauth-analytics" class="btn btn-sm btn-outline" style="margin-left:auto; display:inline-flex; align-items:center; gap:0.35rem;">
+          📊 Tampilkan Laporan Analitik Client
+        </button>
       </div>
 
       <!-- Live Router Re-Auth Table -->
-      <div style="overflow-x:auto; max-height:360px; overflow-y:auto; border:1px solid var(--border); border-radius:6px;">
+      <div style="overflow-x:auto; max-height:280px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; margin-bottom:1rem;">
         <table style="width:100%; border-collapse:collapse; font-size:0.85rem; text-align:left;">
           <thead style="background:var(--bg-card); position:sticky; top:0; border-bottom:2px solid var(--border); z-index:2;">
             <tr>
@@ -150,17 +154,71 @@
               <th style="padding:0.6rem 0.75rem;">Nama &amp; Model</th>
               <th style="padding:0.6rem 0.75rem;">Status Re-Auth</th>
               <th style="padding:0.6rem 0.75rem;">SSID Terdeteksi</th>
+              <th style="padding:0.6rem 0.75rem;">Client LAN/WiFi</th>
               <th style="padding:0.6rem 0.75rem;">Latensi / Pesan</th>
             </tr>
           </thead>
           <tbody id="reauth-all-tbody">
             <tr>
-              <td colspan="5" style="padding:1.5rem; text-align:center; color:var(--text-muted);">
+              <td colspan="6" style="padding:1.5rem; text-align:center; color:var(--text-muted);">
                 Menunggu proses re-auth dimulai...
               </td>
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- Laporan Analitik Client Live (Pie Chart & Summary) -->
+      <div id="reauth-analytics-panel" style="background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:1.25rem; margin-top:0.5rem; box-shadow:var(--shadow);">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; margin-bottom:1rem; border-bottom:1px solid var(--border); padding-bottom:0.75rem;">
+          <div>
+            <h4 style="margin:0; font-size:1.05rem; display:flex; align-items:center; gap:0.5rem; color:#0f172a;">
+              <span>🥧</span> Analitik Perangkat DHCP Client (LAN &amp; WiFi)
+            </h4>
+            <span style="font-size:0.8rem; color:var(--text-muted);">
+              Distribusi merek vendor &amp; perangkat dari hasil re-auth massal seluruh router
+            </span>
+          </div>
+          <button type="button" id="btn-export-clients-csv" class="btn btn-sm btn-outline" style="display:inline-flex; align-items:center; gap:0.35rem;">
+            📥 Ekspor Semua Client ke CSV
+          </button>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:1.5rem; align-items:start;">
+          <!-- Pie Graph Canvas & Center Info -->
+          <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:1rem; background:#f8fafc; border-radius:8px; border:1px solid var(--border);">
+            <div style="position:relative; width:220px; height:220px;">
+              <canvas id="reauth-pie-canvas" width="220" height="220" style="display:block;"></canvas>
+            </div>
+            <div id="reauth-pie-total-badge" style="margin-top:0.75rem; font-weight:700; font-size:0.9rem; color:#0369a1;">
+              Total Client: 0 Perangkat
+            </div>
+          </div>
+
+          <!-- Brand Distribution Legend Table -->
+          <div>
+            <h5 style="margin:0 0 0.5rem 0; font-size:0.9rem; color:var(--text-main);">Distribusi Merek / Vendor:</h5>
+            <div style="max-height:220px; overflow-y:auto; border:1px solid var(--border); border-radius:6px;">
+              <table style="width:100%; border-collapse:collapse; font-size:0.82rem;">
+                <tbody id="reauth-brand-legend-tbody">
+                  <tr><td colspan="3" style="padding:1rem; text-align:center; color:var(--text-muted);">Belum ada data client terhitung</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Top Device Hostnames -->
+          <div>
+            <h5 style="margin:0 0 0.5rem 0; font-size:0.9rem; color:var(--text-main);">Perangkat Populer (Top Hostnames):</h5>
+            <div style="max-height:220px; overflow-y:auto; border:1px solid var(--border); border-radius:6px;">
+              <table style="width:100%; border-collapse:collapse; font-size:0.82rem;">
+                <tbody id="reauth-hostnames-tbody">
+                  <tr><td colspan="2" style="padding:1rem; text-align:center; color:var(--text-muted);">Belum ada hostname terdeteksi</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -635,6 +693,7 @@
         <button class="tab-btn active" data-tab="tab-overview">Ringkasan Perangkat</button>
         <button class="tab-btn" data-tab="tab-wan">Koneksi WAN</button>
         <button class="tab-btn" data-tab="tab-lan">Port LAN</button>
+        <button class="tab-btn" data-tab="tab-clients">📱 Klien Terhubung (DHCP)</button>
         <button class="tab-btn" data-tab="tab-telnet">📟 Telnet & sendcmd</button>
         <button class="tab-btn" data-tab="tab-config">🔐 Backup & Dekripsi</button>
         <button class="tab-btn" data-tab="tab-raw">Raw JSON</button>
@@ -715,6 +774,43 @@
                 </thead>
                 <tbody id="lan-tbody">
                   <tr><td colspan="6" style="text-align:center; color:var(--text-muted);">Tidak ada data LAN</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Klien Terhubung (DHCP) -->
+      <div id="tab-clients" class="tab-content">
+        <div class="card">
+          <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
+            <div>
+              <h3><span>📱</span> Perangkat Terhubung (DHCP Clients)</h3>
+              <p style="margin:0.25rem 0 0 0; font-size:0.8rem; color:var(--text-muted);">
+                Daftar IP, MAC address, hostname, dan interface LAN/WiFi yang terhubung pada router ini.
+              </p>
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <span id="single-clients-count-badge" class="badge badge-neutral">0 Klien</span>
+              <button type="button" id="btn-refresh-clients" class="btn btn-sm btn-outline">🔄 Segarkan</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Alamat IP</th>
+                    <th>MAC Address</th>
+                    <th>Nama Host / Perangkat</th>
+                    <th>Merek / Kategori</th>
+                    <th>Interface</th>
+                    <th>Waktu Sewa (Lease)</th>
+                  </tr>
+                </thead>
+                <tbody id="clients-tbody">
+                  <tr><td colspan="6" style="text-align:center; color:var(--text-muted);">Tidak ada perangkat terhubung atau belum dimuat</td></tr>
                 </tbody>
               </table>
             </div>
@@ -856,6 +952,6 @@
     </main>
   </div>
 
-  <script src="app.js?v=2.2"></script>
+  <script src="app.js?v=2.3"></script>
 </body>
 </html>

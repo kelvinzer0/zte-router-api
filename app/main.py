@@ -301,6 +301,7 @@ class RouterBulkReauthPayload(BaseModel):
     concurrency: Optional[int] = Field(10, ge=1, le=50, description="Maksimum router diproses bersamaan")
     timeout_sec: Optional[float] = Field(6.0, ge=1.0, le=20.0, description="Timeout per router dalam detik")
     fetch_ssid: Optional[bool] = Field(True, description="Ambil info SSID sekaligus untuk memperbarui label router")
+    fetch_clients: Optional[bool] = Field(True, description="Ambil daftar DHCP client LAN/WiFi (MAC & hostname) untuk analitik")
 
 
 class RouterBulkReauthItem(BaseModel):
@@ -314,6 +315,8 @@ class RouterBulkReauthItem(BaseModel):
     status: str = Field(..., description="'ok', 'offline', 'auth_error', 'timeout', 'error'")
     message: str
     latency_ms: int = 0
+    client_count: int = 0
+    clients: list[dict] = Field(default_factory=list, description="Daftar perangkat DHCP client yang terhubung")
 
 
 class RouterBulkReauthResponse(BaseModel):
@@ -323,6 +326,8 @@ class RouterBulkReauthResponse(BaseModel):
     offline_count: int
     failed_count: int
     duration_seconds: float
+    total_clients: int = 0
+    client_analytics: dict = Field(default_factory=dict, description="Analitik agregat perangkat client DHCP (kategori/merek, mac prefix, hostname)")
     items: list[RouterBulkReauthItem] = Field(default_factory=list)
     message: str
 
@@ -1198,12 +1203,43 @@ async def test_router(router_id: str):
         )
 
 
+def classify_dhcp_device(hostname: Optional[str], mac: Optional[str]) -> str:
+    """Classify device manufacturer/type by hostname and MAC address"""
+    hn = (hostname or "").lower().strip()
+    if "oppo" in hn:
+        return "OPPO"
+    if "realme" in hn:
+        return "Realme"
+    if any(k in hn for k in ("redmi", "xiaomi", "poco", "mi ")):
+        return "Xiaomi / Redmi / POCO"
+    if any(k in hn for k in ("galaxy", "samsung")):
+        return "Samsung"
+    if any(k in hn for k in ("vivo", "iqoo")) or hn.startswith(("v2", "i2")):
+        return "Vivo / iQOO"
+    if any(k in hn for k in ("infinix", "tecno", "itel")):
+        return "Infinix / Transsion"
+    if any(k in hn for k in ("iphone", "ipad", "apple", "macbook")):
+        return "Apple (iOS/macOS)"
+    if any(k in hn for k in ("desktop", "laptop", "windows", "pc-")):
+        return "PC / Laptop Windows"
+    if any(k in hn for k in ("tenda", "tp-link", "totolink", "mercusys", "router", "cpe", "ap-")):
+        return "Router / Extender"
+    if any(k in hn for k in ("tv", "android", "stb", "box")):
+        return "Smart TV / Android Box"
+    if any(k in hn for k in ("aliosthings", "tuya", "esp_", "esp32", "esp8266", "iot", "cam", "ipc-")):
+        return "IoT / IP Cam / Smart Home"
+    if hn:
+        return f"Lainnya ({hostname})"
+    return "Tanpa Hostname"
+
+
 async def _reauth_single_router(
     entry,
     fetch_ssid: bool = True,
+    fetch_clients: bool = True,
     timeout_sec: float = 6.0,
 ) -> dict:
-    """Re-authenticate a single router and optionally fetch & persist its SSID"""
+    """Re-authenticate a single router and optionally fetch & persist its SSID and DHCP clients"""
     ip = entry.host
     port = entry.port or 80
     t0 = time.time()
@@ -1217,6 +1253,8 @@ async def _reauth_single_router(
         "status": "ok",
         "message": "Otentikasi ulang berhasil",
         "latency_ms": 0,
+        "client_count": 0,
+        "clients": [],
     }
 
     try:
@@ -1231,14 +1269,20 @@ async def _reauth_single_router(
         def _work():
             client.reauth()
             networks = None
+            raw_clients = None
+            if fetch_clients:
+                try:
+                    raw_clients = client.get_connected_devices()
+                except Exception:
+                    raw_clients = None
             if fetch_ssid:
                 try:
                     networks = client.get_wifi_networks()
                 except Exception:
                     networks = None
-            return networks
+            return networks, raw_clients
 
-        networks = await asyncio.wait_for(asyncio.to_thread(_work), timeout=timeout_sec)
+        networks, raw_clients = await asyncio.wait_for(asyncio.to_thread(_work), timeout=timeout_sec)
         res["latency_ms"] = int((time.time() - t0) * 1000)
         res["model"] = client.model
 
@@ -1249,6 +1293,20 @@ async def _reauth_single_router(
                     res["ssid"] = s
                     registry.update_ssid(entry.id, s)
                     break
+
+        if raw_clients:
+            cleaned_clients = []
+            for d in raw_clients:
+                cleaned_clients.append({
+                    "ip": d.ip_address,
+                    "mac": d.mac_address,
+                    "hostname": d.hostname,
+                    "interface": d.interface,
+                    "brand": classify_dhcp_device(d.hostname, d.mac_address),
+                    "last_seen": d.last_seen,
+                })
+            res["clients"] = cleaned_clients
+            res["client_count"] = len(cleaned_clients)
 
         return res
 
@@ -1273,8 +1331,9 @@ async def reauth_all_stream_generator(
     concurrency: int = 10,
     timeout_sec: float = 6.0,
     fetch_ssid: bool = True,
+    fetch_clients: bool = True,
 ):
-    """Generator streaming SSE events during bulk router re-authentication"""
+    """Generator streaming SSE events during bulk router re-authentication with DHCP client counting"""
     routers = registry.list()
     total = len(routers)
     t0 = time.time()
@@ -1292,6 +1351,8 @@ async def reauth_all_stream_generator(
             "success_count": 0,
             "offline_count": 0,
             "failed_count": 0,
+            "total_clients": 0,
+            "client_analytics": {},
             "duration_seconds": 0.0,
             "message": "Tidak ada router terdaftar.",
         }
@@ -1313,6 +1374,7 @@ async def reauth_all_stream_generator(
             res = await _reauth_single_router(
                 entry,
                 fetch_ssid=fetch_ssid,
+                fetch_clients=fetch_clients,
                 timeout_sec=timeout_sec,
             )
             await queue.put({
@@ -1332,6 +1394,9 @@ async def reauth_all_stream_generator(
     offline_count = 0
     failed_count = 0
     scanned_count = 0
+    total_clients = 0
+    brand_counts: dict[str, int] = {}
+    top_hostnames: dict[str, int] = {}
 
     try:
         while True:
@@ -1344,6 +1409,15 @@ async def reauth_all_stream_generator(
                 st = r.get("status")
                 if st == "ok":
                     success_count += 1
+                    # Aggregate clients
+                    c_list = r.get("clients", [])
+                    total_clients += len(c_list)
+                    for c in c_list:
+                        b = c.get("brand") or "Tanpa Hostname"
+                        brand_counts[b] = brand_counts.get(b, 0) + 1
+                        hn = c.get("hostname")
+                        if hn:
+                            top_hostnames[hn] = top_hostnames.get(hn, 0) + 1
                 elif st == "offline":
                     offline_count += 1
                 else:
@@ -1353,22 +1427,35 @@ async def reauth_all_stream_generator(
                 item["success_count"] = success_count
                 item["offline_count"] = offline_count
                 item["failed_count"] = failed_count
+                item["total_clients"] = total_clients
+                item["brand_counts"] = brand_counts
             yield item
     finally:
         if not producer_task.done():
             producer_task.cancel()
 
     duration = round(time.time() - t0, 2)
+    # Sort analytics
+    sorted_brands = dict(sorted(brand_counts.items(), key=lambda kv: kv[1], reverse=True))
+    sorted_hosts = dict(sorted(top_hostnames.items(), key=lambda kv: kv[1], reverse=True)[:30])
+
     yield {
         "type": "done",
         "total": total,
         "success_count": success_count,
         "offline_count": offline_count,
         "failed_count": failed_count,
+        "total_clients": total_clients,
+        "client_analytics": {
+            "total_clients": total_clients,
+            "brands": sorted_brands,
+            "top_hostnames": sorted_hosts,
+        },
         "duration_seconds": duration,
         "message": (
             f"Re-Auth Massal selesai ({duration}s): "
-            f"{success_count} berhasil, {offline_count} offline, {failed_count} gagal."
+            f"{success_count} berhasil, {offline_count} offline, {failed_count} gagal, "
+            f"{total_clients} perangkat LAN/WiFi terhitung."
         ),
     }
 
@@ -1377,7 +1464,7 @@ async def reauth_all_stream_generator(
     "/routers/reauth-all-stream",
     tags=["Routers"],
     summary="Bulk re-authenticate all routers with live SSE stream",
-    description="Re-authenticate all routers concurrently with real-time SSE progress and auto-update SSID labels.",
+    description="Re-authenticate all routers concurrently with real-time SSE progress, DHCP client device analytics, and auto-update SSID labels.",
 )
 async def reauth_all_routers_stream(payload: Optional[RouterBulkReauthPayload] = None):
     """Stream live SSE events during bulk router re-authentication"""
@@ -1390,6 +1477,7 @@ async def reauth_all_routers_stream(payload: Optional[RouterBulkReauthPayload] =
                 concurrency=p.concurrency or 10,
                 timeout_sec=p.timeout_sec or 6.0,
                 fetch_ssid=True if p.fetch_ssid is None else p.fetch_ssid,
+                fetch_clients=True if p.fetch_clients is None else p.fetch_clients,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as e:
@@ -1412,7 +1500,7 @@ async def reauth_all_routers_stream(payload: Optional[RouterBulkReauthPayload] =
     response_model=RouterBulkReauthResponse,
     tags=["Routers"],
     summary="Bulk re-authenticate all routers",
-    description="Force re-authenticate all registered routers and update primary SSID labels.",
+    description="Force re-authenticate all registered routers, counting connected DHCP devices and updating SSID labels.",
 )
 async def reauth_all_routers(payload: Optional[RouterBulkReauthPayload] = None):
     """Bulk re-authenticate all registered routers"""
@@ -1428,6 +1516,8 @@ async def reauth_all_routers(payload: Optional[RouterBulkReauthPayload] = None):
             offline_count=0,
             failed_count=0,
             duration_seconds=0.0,
+            total_clients=0,
+            client_analytics={},
             items=[],
             message="Tidak ada router terdaftar.",
         )
@@ -1440,6 +1530,7 @@ async def reauth_all_routers(payload: Optional[RouterBulkReauthPayload] = None):
             return await _reauth_single_router(
                 r,
                 fetch_ssid=True if p.fetch_ssid is None else p.fetch_ssid,
+                fetch_clients=True if p.fetch_clients is None else p.fetch_clients,
                 timeout_sec=p.timeout_sec or 6.0,
             )
 
@@ -1448,12 +1539,23 @@ async def reauth_all_routers(payload: Optional[RouterBulkReauthPayload] = None):
     success_count = 0
     offline_count = 0
     failed_count = 0
+    total_clients = 0
+    brand_counts: dict[str, int] = {}
+    top_hostnames: dict[str, int] = {}
 
     for res in results:
         if isinstance(res, dict):
             st = res.get("status")
             if st == "ok":
                 success_count += 1
+                c_list = res.get("clients", [])
+                total_clients += len(c_list)
+                for c in c_list:
+                    b = c.get("brand") or "Tanpa Hostname"
+                    brand_counts[b] = brand_counts.get(b, 0) + 1
+                    hn = c.get("hostname")
+                    if hn:
+                        top_hostnames[hn] = top_hostnames.get(hn, 0) + 1
             elif st == "offline":
                 offline_count += 1
             else:
@@ -1461,18 +1563,102 @@ async def reauth_all_routers(payload: Optional[RouterBulkReauthPayload] = None):
             items.append(RouterBulkReauthItem(**res))
 
     duration = round(time.time() - t0, 2)
+    sorted_brands = dict(sorted(brand_counts.items(), key=lambda kv: kv[1], reverse=True))
+    sorted_hosts = dict(sorted(top_hostnames.items(), key=lambda kv: kv[1], reverse=True)[:30])
+
     return RouterBulkReauthResponse(
         total=total,
         success_count=success_count,
         offline_count=offline_count,
         failed_count=failed_count,
         duration_seconds=duration,
+        total_clients=total_clients,
+        client_analytics={
+            "total_clients": total_clients,
+            "brands": sorted_brands,
+            "top_hostnames": sorted_hosts,
+        },
         items=items,
         message=(
             f"Re-Auth Massal selesai ({duration}s): "
-            f"{success_count} berhasil, {offline_count} offline, {failed_count} gagal."
+            f"{success_count} berhasil, {offline_count} offline, {failed_count} gagal, "
+            f"{total_clients} perangkat LAN/WiFi terhitung."
         ),
     )
+
+
+@app.get(
+    "/routers/analytics/clients",
+    tags=["Routers"],
+    summary="Get aggregated DHCP client analytics across routers",
+    description="Fetch connected client device breakdown, vendor/brand distribution, and top hostnames.",
+)
+async def get_routers_client_analytics(
+    limit_routers: Optional[int] = Query(None, ge=1, le=500, description="Batasi jumlah router yang dicek"),
+    timeout_sec: float = Query(4.0, ge=1.0, le=15.0, description="Batas timeout per router"),
+):
+    """Aggregate connected DHCP clients from routers"""
+    routers = registry.list()
+    if limit_routers:
+        routers = routers[:limit_routers]
+
+    t0 = time.time()
+    sem = asyncio.Semaphore(15)
+
+    async def _fetch(r):
+        async with sem:
+            try:
+                if not await check_tcp_port(r.host, r.port or 80, timeout=1.0):
+                    return r, []
+                client = get_client_for_router(r.id)
+                def _get():
+                    if not client.is_logged_in:
+                        client.login()
+                    return client.get_connected_devices()
+                devs = await asyncio.wait_for(asyncio.to_thread(_get), timeout=timeout_sec)
+                return r, devs
+            except Exception:
+                return r, []
+
+    results = await asyncio.gather(*[_fetch(r) for r in routers], return_exceptions=True)
+    total_clients = 0
+    brand_counts: dict[str, int] = {}
+    top_hostnames: dict[str, int] = {}
+    router_client_breakdown = []
+
+    for item in results:
+        if isinstance(item, tuple):
+            r, devs = item
+            if devs:
+                dev_count = len(devs)
+                total_clients += dev_count
+                router_client_breakdown.append({
+                    "router_id": r.id,
+                    "name": r.name,
+                    "ip": r.host,
+                    "ssid": r.ssid or "",
+                    "client_count": dev_count,
+                })
+                for d in devs:
+                    b = classify_dhcp_device(d.hostname, d.mac_address)
+                    brand_counts[b] = brand_counts.get(b, 0) + 1
+                    if d.hostname:
+                        top_hostnames[d.hostname] = top_hostnames.get(d.hostname, 0) + 1
+
+    sorted_brands = dict(sorted(brand_counts.items(), key=lambda kv: kv[1], reverse=True))
+    sorted_hosts = dict(sorted(top_hostnames.items(), key=lambda kv: kv[1], reverse=True)[:30])
+    router_client_breakdown.sort(key=lambda x: x["client_count"], reverse=True)
+
+    return {
+        "status": "ok",
+        "total_routers_scanned": len(routers),
+        "routers_with_clients": len(router_client_breakdown),
+        "total_clients": total_clients,
+        "brands": sorted_brands,
+        "top_hostnames": sorted_hosts,
+        "top_routers": router_client_breakdown[:20],
+        "duration_seconds": round(time.time() - t0, 2),
+    }
 
 
 @app.post(
@@ -1578,6 +1764,7 @@ async def get_router_overview(router_id: str):
 
     dev = safe_call(lambda c: c.get_device_info(), None)
     pon = safe_call(lambda c: c.get_pon_data(), None)
+    devices = safe_call(lambda c: c.get_connected_devices(), [])
     wifi = safe_call(lambda c: c.get_wifi_networks(), [])
     if wifi:
         for w in wifi:
@@ -1589,7 +1776,6 @@ async def get_router_overview(router_id: str):
     wan = safe_call(lambda c: c.get_wan_status(), [])
     voip = safe_call(lambda c: c.get_voip_status(), [])
     system = safe_call(lambda c: c.get_system_stats(), {})
-    devices = safe_call(lambda c: c.get_connected_devices(), [])
 
     return RouterOverviewResponse(
         router=RouterResponse(**entry.to_dict()),
