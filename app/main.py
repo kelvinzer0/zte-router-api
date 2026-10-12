@@ -8,19 +8,43 @@ LAN/WAN interfaces, and multi-router management.
 
 from __future__ import annotations
 
+import asyncio
+import csv
+import io
 import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    __package__ = "app"
 
 from .router_registry import RouterRegistry, RouterRegistryError
+from .router_scanner import (
+    AUTO_CREDENTIALS,
+    check_tcp_port,
+    parse_ip_targets,
+    probe_zte_device,
+    scan_and_add_routers,
+    scan_range_generator,
+)
+from .zte_crypto import ZTEConfigError, decrypt_config_bin, extract_credentials_from_xml
+from .zte_telnet import (
+    ZTETelnetClient,
+    ZTETelnetError,
+    enable_telnet_factory_mode,
+    test_telnet_port,
+)
 from .zte_client import (
     ConnectedDevice,
     DeviceInfo,
@@ -231,6 +255,7 @@ class RouterResponse(BaseModel):
     address: str = Field(..., description="Host:port address")
     url: str = Field(..., description="Router base URL")
     has_password: bool = Field(False, description="Whether a password is set")
+    ssid: Optional[str] = Field("", description="Primary WiFi SSID label")
     created_at: Optional[str] = Field(None, description="Registration date")
     updated_at: Optional[str] = Field(None, description="Last update date")
 
@@ -248,11 +273,14 @@ class RouterCreatePayload(BaseModel):
     name: str = Field(..., description="Friendly router name", max_length=64)
     host: str = Field(..., description="Router IP or hostname")
     port: Optional[int] = Field(80, description="Web port", ge=1, le=65535)
+    credential_mode: Optional[str] = Field("manual", description="Mode kredensial: 'auto' (F609: admin/admin, F677V2: superadmin/suportadmin, F477V2: Administrator/suportadmin) atau 'manual'")
+    model: Optional[str] = Field(None, description="Pilihan model router jika mode auto: 'F609', 'F677V2', 'F477V2', atau 'auto' untuk auto-detect")
     username: Optional[str] = Field("admin", description="Web admin username", max_length=64)
     password: Optional[str] = Field("", description="Web admin password", max_length=128)
     timeout: Optional[int] = Field(10, description="Request timeout seconds", ge=1, le=300)
     location: Optional[str] = Field("", description="Router location", max_length=128)
     notes: Optional[str] = Field("", description="Notes", max_length=512)
+    ssid: Optional[str] = Field("", description="Primary SSID", max_length=128)
 
 
 class RouterUpdatePayload(BaseModel):
@@ -265,6 +293,115 @@ class RouterUpdatePayload(BaseModel):
     timeout: Optional[int] = Field(None, description="Request timeout seconds", ge=1, le=300)
     location: Optional[str] = Field(None, description="Router location", max_length=128)
     notes: Optional[str] = Field(None, description="Notes", max_length=512)
+    ssid: Optional[str] = Field(None, description="Primary SSID", max_length=128)
+
+
+class RouterBulkReauthPayload(BaseModel):
+    """Payload to bulk re-authenticate all registered routers"""
+    concurrency: Optional[int] = Field(10, ge=1, le=50, description="Maksimum router diproses bersamaan")
+    timeout_sec: Optional[float] = Field(6.0, ge=1.0, le=20.0, description="Timeout per router dalam detik")
+    fetch_ssid: Optional[bool] = Field(True, description="Ambil info SSID sekaligus untuk memperbarui label router")
+
+
+class RouterBulkReauthItem(BaseModel):
+    """Single router re-auth result"""
+    router_id: str
+    name: str
+    ip: str
+    port: int
+    model: Optional[str] = None
+    ssid: Optional[str] = None
+    status: str = Field(..., description="'ok', 'offline', 'auth_error', 'timeout', 'error'")
+    message: str
+    latency_ms: int = 0
+
+
+class RouterBulkReauthResponse(BaseModel):
+    """Result of bulk re-authenticating routers"""
+    total: int
+    success_count: int
+    offline_count: int
+    failed_count: int
+    duration_seconds: float
+    items: list[RouterBulkReauthItem] = Field(default_factory=list)
+    message: str
+
+
+class RouterScanPayload(BaseModel):
+    """Payload to scan an IP range/CIDR and auto-register F609, F677V2, and F477V2 routers"""
+    cidr: str = Field(..., description="IP subnet in CIDR notation (e.g. 10.200.204.0/24) or range (e.g. 10.200.204.1-254)")
+    port: Optional[int] = Field(80, ge=1, le=65535, description="Port to probe")
+    credential_mode: Optional[str] = Field("auto", description="Mode kredensial: 'auto' (F609: admin/admin, F677V2: superadmin/suportadmin, F477V2: Administrator/suportadmin) atau 'manual'")
+    username: Optional[str] = Field("admin", max_length=64, description="Web admin username (digunakan jika credential_mode='manual')")
+    password: Optional[str] = Field("", max_length=128, description="Web admin password (digunakan jika credential_mode='manual')")
+    timeout: Optional[int] = Field(10, ge=1, le=120, description="Router request timeout seconds")
+    connect_timeout: Optional[float] = Field(1.5, ge=0.5, le=10.0, description="Probe timeout seconds per IP")
+    allowed_models: Optional[list[str]] = Field(default_factory=lambda: ["F609", "F677V2", "F477V2"], description="Filter models (default: F609, F677V2, F477V2)")
+    name_template: Optional[str] = Field("ZTE {model} ({ip})", max_length=64, description="Template for friendly name")
+    location: Optional[str] = Field("", max_length=128, description="Location to assign")
+    notes: Optional[str] = Field("", max_length=512, description="Notes to assign")
+    auto_add: Optional[bool] = Field(True, description="Whether to automatically register discovered routers")
+    concurrency: Optional[int] = Field(60, ge=1, le=120, description="Max concurrent IP scans")
+
+
+class RouterScanItem(BaseModel):
+    """Discovered router item during scan"""
+    ip: str
+    port: int
+    model: str
+    name: str
+    username: Optional[str] = Field(None, description="Username yang digunakan")
+    status: str
+    router_id: Optional[str] = None
+    message: Optional[str] = None
+
+
+class RouterScanResponse(BaseModel):
+    """Result of router range scan"""
+    target: str = Field(..., description="Target subnet or range scanned")
+    total_scanned: int = Field(..., description="Total IP addresses probed")
+    found_count: int = Field(..., description="Total matched routers found")
+    added_count: int = Field(..., description="Total new routers added to registry")
+    already_exists_count: int = Field(..., description="Total routers already registered")
+    duration_seconds: float = Field(..., description="Scan duration in seconds")
+    items: list[RouterScanItem] = Field(default_factory=list, description="List of discovered/added routers")
+    message: str = Field(..., description="Scan status message")
+
+
+class RouterSSIDSearchPayload(BaseModel):
+    """Payload to search SSID across all registered routers with per-router reauth"""
+    query: str = Field(..., description="Nama atau potongan nama SSID yang dicari (kosongkan atau '*' untuk semua)")
+    exact_match: Optional[bool] = Field(False, description="Pencocokan persis (case-insensitive) jika True, atau substring jika False")
+    reauth: Optional[bool] = Field(True, description="Paksa login ulang (reauth) sebelum mengambil info WiFi agar sesi tidak kedaluwarsa")
+    concurrency: Optional[int] = Field(5, ge=1, le=30, description="Maksimum router diperiksa bersamaan (1 untuk urutan murni 1-per-1)")
+    timeout_sec: Optional[float] = Field(6.0, ge=1.0, le=20.0, description="Batas waktu per router dalam detik")
+
+
+class SSIDMatchRouter(BaseModel):
+    """Result of SSID search for a single router"""
+    router_id: str
+    name: str
+    host: str
+    port: int
+    model: Optional[str] = None
+    location: Optional[str] = None
+    notes: Optional[str] = None
+    matched_ssids: list[dict] = Field(default_factory=list, description="Daftar SSID yang cocok")
+    total_ssids: int = 0
+    status: str = Field("ok", description="'matched', 'no_match', 'offline', 'auth_error', 'timeout', 'error'")
+    error_message: Optional[str] = None
+    latency_ms: Optional[int] = None
+
+
+class RouterSSIDSearchResponse(BaseModel):
+    """Response of SSID search across routers"""
+    query: str
+    total_routers: int
+    total_scanned: int
+    total_matches: int
+    duration_seconds: float
+    matches: list[SSIDMatchRouter] = Field(default_factory=list)
+    message: str
 
 
 class RouterTestResponse(BaseModel):
@@ -313,6 +450,23 @@ class LoginResponse(BaseModel):
 class ErrorResponse(BaseModel):
     """Error response"""
     detail: str = Field(..., description="Error message")
+
+
+class DecryptedCredentials(BaseModel):
+    """Extracted sensitive router credentials"""
+    pppoe: list[dict] = Field(default_factory=list, description="PPPoE username and password pairs")
+    wifi: list[dict] = Field(default_factory=list, description="WiFi SSID and password pairs")
+    admin: list[dict] = Field(default_factory=list, description="Web management accounts")
+
+
+class ConfigDecryptResponse(BaseModel):
+    """Result of router config.bin decryption"""
+    success: bool = Field(..., description="Whether decryption succeeded")
+    router_id: Optional[str] = Field(None, description="Router ID if from registry")
+    model: Optional[str] = Field(None, description="Router model / signature")
+    encryption_key: Optional[str] = Field(None, description="Encryption key used to decode")
+    credentials: DecryptedCredentials = Field(default_factory=DecryptedCredentials, description="Extracted credentials")
+    xml_preview: Optional[str] = Field(None, description="Decrypted XML snippet")
 
 
 # ==============================================================================
@@ -408,10 +562,542 @@ async def list_routers():
 async def create_router(payload: RouterCreatePayload):
     """Add a new router"""
     try:
-        entry = registry.create(payload.model_dump(exclude_unset=True))
+        data = payload.model_dump(exclude_unset=True)
+        cred_mode = data.pop("credential_mode", "manual")
+        req_model = data.pop("model", None)
+
+        if cred_mode == "auto":
+            if req_model and "477" in req_model.upper():
+                data["username"] = AUTO_CREDENTIALS["F477V2"]["username"]
+                data["password"] = AUTO_CREDENTIALS["F477V2"]["password"]
+            elif req_model and "677" in req_model.upper():
+                data["username"] = AUTO_CREDENTIALS["F677V2"]["username"]
+                data["password"] = AUTO_CREDENTIALS["F677V2"]["password"]
+            elif req_model and "609" in req_model.upper():
+                data["username"] = AUTO_CREDENTIALS["F609"]["username"]
+                data["password"] = AUTO_CREDENTIALS["F609"]["password"]
+            else:
+                # Auto-detect via fast probe
+                probe = await probe_zte_device(
+                    ip=data.get("host", ""),
+                    port=data.get("port", 80),
+                    credential_mode="auto",
+                    timeout=min(float(data.get("timeout", 10)), 3.0),
+                )
+                if probe and probe.get("username") and probe.get("password"):
+                    data["username"] = probe["username"]
+                    data["password"] = probe["password"]
+                    if not data.get("name") or data.get("name") == "ZTE Router":
+                        data["name"] = f"ZTE {probe['model']} ({probe['ip']})"
+                else:
+                    # Fallback to F609 default
+                    data["username"] = AUTO_CREDENTIALS["F609"]["username"]
+                    data["password"] = AUTO_CREDENTIALS["F609"]["password"]
+
+        entry = registry.create(data)
         return RouterResponse(**entry.to_dict())
     except RouterRegistryError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+async def _extract_router_wifi_record(entry, timeout_sec: float = 3.5) -> tuple[str, list[dict]]:
+    """
+    Extract WiFi networks from a single router entry.
+    Returns (ip, list of dicts with 'ssid' and 'password').
+    """
+    ip = entry.host
+    try:
+        # Fast TCP port check to skip offline routers immediately
+        if not await check_tcp_port(ip, entry.port or 80, timeout=0.8):
+            return ip, []
+
+        client = get_client_for_router(entry.id)
+
+        def _fetch():
+            if not client.is_logged_in:
+                client.login()
+            return client.get_wifi_networks()
+
+        networks = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=timeout_sec)
+        return ip, networks or []
+    except Exception:
+        return ip, []
+
+
+@app.get(
+    "/routers/backup-csv",
+    tags=["Routers"],
+    summary="Backup router WiFi credentials as CSV (IP, SSID, Password)",
+    description="Ekspor data router dalam format CSV dengan kolom HANYA: ip, ssid, password.",
+)
+async def backup_routers_wifi_csv(
+    router_id: Optional[str] = Query(None, description="Router ID tertentu (kosongkan untuk backup seluruh router)"),
+    include_empty: bool = Query(False, description="Sertakan IP router meski offline atau tidak ada WiFi"),
+    concurrency: int = Query(20, ge=1, le=50, description="Maksimum router diproses bersamaan"),
+    timeout_sec: float = Query(4.0, ge=1.0, le=15.0, description="Timeout per router dalam detik"),
+):
+    """
+    Backup router WiFi ke CSV:
+    Hanya mengekspor kolom: ip, ssid, password
+    """
+    if router_id:
+        target_router = get_router_or_default(router_id)
+        if not target_router:
+            raise HTTPException(status_code=404, detail="Router tidak ditemukan")
+        target_routers = [target_router]
+    else:
+        target_routers = registry.list()
+
+    if not target_routers:
+        raise HTTPException(status_code=404, detail="Tidak ada router terdaftar di sistem")
+
+    # Resolve concurrency & timeout safely if called directly
+    limit_concurrency = concurrency if isinstance(concurrency, int) else 20
+    limit_timeout = timeout_sec if isinstance(timeout_sec, (int, float)) else 4.0
+    sem = asyncio.Semaphore(limit_concurrency)
+
+    async def _worker(r):
+        async with sem:
+            return await _extract_router_wifi_record(r, timeout_sec=limit_timeout)
+
+    results = await asyncio.gather(*[_worker(r) for r in target_routers])
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    # Header: ONLY ip, ssid, password as explicitly requested
+    writer.writerow(["ip", "ssid", "password"])
+
+    for ip, networks in results:
+        if networks:
+            for net in networks:
+                ssid = net.get("ssid") or ""
+                pwd = net.get("password") or ""
+                if ssid:
+                    writer.writerow([ip, ssid, pwd])
+        elif include_empty:
+            writer.writerow([ip, "", ""])
+
+    csv_data = output.getvalue()
+    ts = int(time.time())
+    if router_id and len(target_routers) == 1:
+        clean_ip = target_routers[0].host.replace(".", "_")
+        filename = f"router_{clean_ip}_wifi_backup_{ts}.csv"
+    else:
+        filename = f"routers_wifi_backup_{ts}.csv"
+
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": "text/csv; charset=utf-8",
+        },
+    )
+
+
+@app.post(
+    "/routers/scan",
+    response_model=RouterScanResponse,
+    tags=["Routers"],
+    summary="Scan IP range and add F609/F677V2 routers",
+    description="Scan an IP range (e.g. 10.200.204.0/24) specifically for ZTE F609 and F677V2 routers and register them.",
+)
+async def scan_routers(payload: RouterScanPayload):
+    """Scan IP range for F609 and F677V2 routers and optionally auto-add them"""
+    try:
+        parse_ip_targets(payload.cidr)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        result = await scan_and_add_routers(
+            registry=registry,
+            target_str=payload.cidr,
+            port=payload.port or 80,
+            username=payload.username or "admin",
+            password=payload.password or "",
+            credential_mode=payload.credential_mode or "auto",
+            timeout=payload.timeout or 10,
+            connect_timeout=payload.connect_timeout or 1.5,
+            allowed_models=tuple(payload.allowed_models or ["F609", "F677V2", "F477V2"]),
+            name_template=payload.name_template or "ZTE {model} ({ip})",
+            location=payload.location or "",
+            notes=payload.notes or "",
+            auto_add=payload.auto_add if payload.auto_add is not None else True,
+            concurrency=payload.concurrency or 60,
+        )
+        return RouterScanResponse(
+            target=result["target"],
+            total_scanned=result["total_scanned"],
+            found_count=result["found_count"],
+            added_count=result["added_count"],
+            already_exists_count=result["already_exists_count"],
+            duration_seconds=result["duration_seconds"],
+            items=[RouterScanItem(**item) for item in result.get("items", [])],
+            message=result["message"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal memindai subnet: {e}")
+
+
+@app.post(
+    "/routers/scan-stream",
+    tags=["Routers"],
+    summary="Scan IP range with live SSE stream",
+    description="Scan an IP range with real-time SSE event streaming for live discovery updates.",
+)
+async def scan_routers_stream(payload: RouterScanPayload):
+    """Stream live events during IP range scan"""
+    try:
+        parse_ip_targets(payload.cidr)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    import json
+
+    async def event_generator():
+        try:
+            async for event in scan_range_generator(
+                registry=registry,
+                target_str=payload.cidr,
+                port=payload.port or 80,
+                username=payload.username or "admin",
+                password=payload.password or "",
+                credential_mode=payload.credential_mode or "auto",
+                timeout=payload.timeout or 10,
+                connect_timeout=payload.connect_timeout or 1.5,
+                allowed_models=tuple(payload.allowed_models or ["F609", "F677V2", "F477V2"]),
+                name_template=payload.name_template or "ZTE {model} ({ip})",
+                location=payload.location or "",
+                notes=payload.notes or "",
+                auto_add=payload.auto_add if payload.auto_add is not None else True,
+                concurrency=payload.concurrency or 60,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            err_event = {"type": "error", "message": str(e)}
+            yield f"data: {json.dumps(err_event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _search_single_router_wifi(
+    entry,
+    query: str,
+    exact_match: bool = False,
+    force_reauth: bool = True,
+    timeout_sec: float = 6.0,
+) -> dict:
+    """
+    Search WiFi networks on a single router with optional fresh reauth.
+    Returns dict representing SSIDMatchRouter fields.
+    """
+    ip = entry.host
+    port = entry.port or 80
+    t0 = time.time()
+    result = {
+        "router_id": entry.id,
+        "name": entry.name,
+        "host": ip,
+        "port": port,
+        "model": None,
+        "location": entry.location,
+        "notes": entry.notes,
+        "matched_ssids": [],
+        "total_ssids": 0,
+        "status": "ok",
+        "error_message": None,
+        "latency_ms": 0,
+    }
+
+    try:
+        # Fast TCP port check to skip offline routers immediately
+        if not await check_tcp_port(ip, port, timeout=1.0):
+            result["status"] = "offline"
+            result["error_message"] = f"Port {port} tidak merespons (Offline)"
+            result["latency_ms"] = int((time.time() - t0) * 1000)
+            return result
+
+        client = get_client_for_router(entry.id)
+        result["model"] = client.model
+
+        def _work():
+            # Force reauth per router if requested or if not logged in
+            if force_reauth:
+                client.reauth()
+            elif not client.is_logged_in:
+                client.login()
+            return client.get_wifi_networks()
+
+        networks = await asyncio.wait_for(asyncio.to_thread(_work), timeout=timeout_sec)
+        result["latency_ms"] = int((time.time() - t0) * 1000)
+        result["model"] = client.model
+
+        clean_query = (query or "").strip().lower()
+        matched = []
+        for net in (networks or []):
+            ssid_name = str(net.get("ssid") or "").strip()
+            if not ssid_name:
+                continue
+
+            if not clean_query or clean_query == "*":
+                is_match = True
+            elif exact_match:
+                is_match = (ssid_name.lower() == clean_query)
+            else:
+                is_match = (clean_query in ssid_name.lower())
+
+            if is_match:
+                matched.append({
+                    "ssid": ssid_name,
+                    "password": net.get("password") or "",
+                    "enabled": bool(net.get("enabled", True)),
+                    "security": net.get("security") or "WPA/WPA2-PSK",
+                    "band": net.get("band") or "2.4G",
+                })
+
+        result["total_ssids"] = len(networks or [])
+        result["matched_ssids"] = matched
+        result["status"] = "matched" if matched else "no_match"
+        return result
+
+    except asyncio.TimeoutError:
+        result["status"] = "timeout"
+        result["error_message"] = f"Timeout ({timeout_sec}s) saat menghubungi router"
+        result["latency_ms"] = int((time.time() - t0) * 1000)
+        return result
+    except ZTEAuthenticationError as e:
+        result["status"] = "auth_error"
+        result["error_message"] = f"Gagal otentikasi: {e}"
+        result["latency_ms"] = int((time.time() - t0) * 1000)
+        return result
+    except Exception as e:
+        result["status"] = "error"
+        result["error_message"] = str(e)
+        result["latency_ms"] = int((time.time() - t0) * 1000)
+        return result
+
+
+async def search_ssid_stream_generator(
+    query: str,
+    exact_match: bool = False,
+    reauth: bool = True,
+    concurrency: int = 5,
+    timeout_sec: float = 6.0,
+):
+    """
+    Generator streaming SSE events while checking routers for matching SSIDs.
+    """
+    routers = registry.list()
+    total = len(routers)
+    t0 = time.time()
+
+    yield {
+        "type": "start",
+        "query": query,
+        "total_routers": total,
+        "exact_match": exact_match,
+        "reauth": reauth,
+        "concurrency": concurrency,
+    }
+
+    if total == 0:
+        yield {
+            "type": "done",
+            "query": query,
+            "total_scanned": 0,
+            "total_matches": 0,
+            "duration_seconds": 0.0,
+            "matches": [],
+            "message": "Tidak ada router terdaftar di sistem.",
+        }
+        return
+
+    sem = asyncio.Semaphore(concurrency)
+    matched_results = []
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def _worker(idx: int, entry):
+        async with sem:
+            await queue.put({
+                "type": "router_checking",
+                "index": idx + 1,
+                "total": total,
+                "router_id": entry.id,
+                "ip": entry.host,
+                "name": entry.name,
+            })
+            res = await _search_single_router_wifi(
+                entry,
+                query=query,
+                exact_match=exact_match,
+                force_reauth=reauth,
+                timeout_sec=timeout_sec,
+            )
+            await queue.put({
+                "type": "router_result",
+                "index": idx + 1,
+                "total": total,
+                "result": res,
+            })
+
+    async def _producer():
+        tasks = [_worker(i, r) for i, r in enumerate(routers)]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await queue.put(None)
+
+    producer_task = asyncio.create_task(_producer())
+    scanned_count = 0
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            if item.get("type") == "router_result":
+                scanned_count += 1
+                item["scanned_count"] = scanned_count
+                item["percent"] = int((scanned_count / total) * 100) if total else 100
+                res = item.get("result", {})
+                if res.get("status") == "matched":
+                    matched_results.append(res)
+            yield item
+    finally:
+        if not producer_task.done():
+            producer_task.cancel()
+
+    duration = round(time.time() - t0, 2)
+    yield {
+        "type": "done",
+        "query": query,
+        "total_scanned": total,
+        "total_matches": len(matched_results),
+        "duration_seconds": duration,
+        "matches": matched_results,
+        "message": f"Pencarian selesai dalam {duration} detik. Ditemukan {len(matched_results)} router yang memiliki SSID '{query}'.",
+    }
+
+
+@app.post(
+    "/routers/search-ssid-stream",
+    tags=["Routers"],
+    summary="Search SSID across routers with live SSE stream",
+    description="Cari di IP router mana suatu SSID berada dengan re-auth per router dan live SSE streaming update.",
+)
+async def search_ssid_stream(payload: RouterSSIDSearchPayload):
+    """Stream live SSE events while searching SSID across all registered routers"""
+    import json
+
+    async def event_generator():
+        try:
+            async for event in search_ssid_stream_generator(
+                query=payload.query,
+                exact_match=bool(payload.exact_match),
+                reauth=bool(payload.reauth),
+                concurrency=payload.concurrency or 5,
+                timeout_sec=payload.timeout_sec or 6.0,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            err_event = {"type": "error", "message": str(e)}
+            yield f"data: {json.dumps(err_event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post(
+    "/routers/search-ssid",
+    response_model=RouterSSIDSearchResponse,
+    tags=["Routers"],
+    summary="Search SSID across registered routers",
+    description="Cari di IP router mana suatu SSID berada dengan opsi re-auth per router.",
+)
+async def search_ssid(payload: RouterSSIDSearchPayload):
+    """Cari SSID di seluruh router terdaftar (melakukan re-auth per router jika diminta)"""
+    routers = registry.list()
+    total = len(routers)
+    t0 = time.time()
+
+    if total == 0:
+        return RouterSSIDSearchResponse(
+            query=payload.query,
+            total_routers=0,
+            total_scanned=0,
+            total_matches=0,
+            duration_seconds=0.0,
+            matches=[],
+            message="Tidak ada router terdaftar di sistem.",
+        )
+
+    concurrency = payload.concurrency or 5
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _worker(r):
+        async with sem:
+            return await _search_single_router_wifi(
+                r,
+                query=payload.query,
+                exact_match=bool(payload.exact_match),
+                force_reauth=bool(payload.reauth),
+                timeout_sec=payload.timeout_sec or 6.0,
+            )
+
+    results = await asyncio.gather(*[_worker(r) for r in routers], return_exceptions=True)
+    matches = []
+    for res in results:
+        if isinstance(res, dict) and res.get("status") == "matched":
+            matches.append(SSIDMatchRouter(**res))
+
+    duration = round(time.time() - t0, 2)
+    return RouterSSIDSearchResponse(
+        query=payload.query,
+        total_routers=total,
+        total_scanned=total,
+        total_matches=len(matches),
+        duration_seconds=duration,
+        matches=matches,
+        message=f"Pencarian selesai dalam {duration} detik. Ditemukan {len(matches)} router yang memiliki SSID '{payload.query}'.",
+    )
+
+
+@app.get(
+    "/routers/search-ssid",
+    response_model=RouterSSIDSearchResponse,
+    tags=["Routers"],
+    summary="Search SSID across routers (GET query)",
+    description="Cari SSID di seluruh router via GET query parameter.",
+)
+async def search_ssid_get(
+    query: str = Query(..., description="Nama atau potongan nama SSID yang dicari"),
+    exact_match: bool = Query(False, description="Pencocokan persis (case-insensitive)"),
+    reauth: bool = Query(True, description="Paksa login ulang (reauth) per router"),
+    concurrency: int = Query(5, ge=1, le=30, description="Maksimum router bersamaan"),
+    timeout_sec: float = Query(6.0, ge=1.0, le=20.0, description="Timeout per router (detik)"),
+):
+    """Cari SSID via GET query parameter"""
+    payload = RouterSSIDSearchPayload(
+        query=query,
+        exact_match=exact_match,
+        reauth=reauth,
+        concurrency=concurrency,
+        timeout_sec=timeout_sec,
+    )
+    return await search_ssid(payload)
 
 
 @app.get(
@@ -512,6 +1198,283 @@ async def test_router(router_id: str):
         )
 
 
+async def _reauth_single_router(
+    entry,
+    fetch_ssid: bool = True,
+    timeout_sec: float = 6.0,
+) -> dict:
+    """Re-authenticate a single router and optionally fetch & persist its SSID"""
+    ip = entry.host
+    port = entry.port or 80
+    t0 = time.time()
+    res = {
+        "router_id": entry.id,
+        "name": entry.name,
+        "ip": ip,
+        "port": port,
+        "model": None,
+        "ssid": entry.ssid or "",
+        "status": "ok",
+        "message": "Otentikasi ulang berhasil",
+        "latency_ms": 0,
+    }
+
+    try:
+        if not await check_tcp_port(ip, port, timeout=1.0):
+            res["status"] = "offline"
+            res["message"] = f"Port {port} tidak merespons (Offline)"
+            res["latency_ms"] = int((time.time() - t0) * 1000)
+            return res
+
+        client = get_client_for_router(entry.id)
+
+        def _work():
+            client.reauth()
+            networks = None
+            if fetch_ssid:
+                try:
+                    networks = client.get_wifi_networks()
+                except Exception:
+                    networks = None
+            return networks
+
+        networks = await asyncio.wait_for(asyncio.to_thread(_work), timeout=timeout_sec)
+        res["latency_ms"] = int((time.time() - t0) * 1000)
+        res["model"] = client.model
+
+        if networks:
+            for net in networks:
+                s = str(net.get("ssid") or "").strip()
+                if s:
+                    res["ssid"] = s
+                    registry.update_ssid(entry.id, s)
+                    break
+
+        return res
+
+    except asyncio.TimeoutError:
+        res["status"] = "timeout"
+        res["message"] = f"Timeout ({timeout_sec}s)"
+        res["latency_ms"] = int((time.time() - t0) * 1000)
+        return res
+    except ZTEAuthenticationError as e:
+        res["status"] = "auth_error"
+        res["message"] = f"Gagal otentikasi: {e}"
+        res["latency_ms"] = int((time.time() - t0) * 1000)
+        return res
+    except Exception as e:
+        res["status"] = "error"
+        res["message"] = str(e)
+        res["latency_ms"] = int((time.time() - t0) * 1000)
+        return res
+
+
+async def reauth_all_stream_generator(
+    concurrency: int = 10,
+    timeout_sec: float = 6.0,
+    fetch_ssid: bool = True,
+):
+    """Generator streaming SSE events during bulk router re-authentication"""
+    routers = registry.list()
+    total = len(routers)
+    t0 = time.time()
+
+    yield {
+        "type": "start",
+        "total": total,
+        "concurrency": concurrency,
+    }
+
+    if total == 0:
+        yield {
+            "type": "done",
+            "total": 0,
+            "success_count": 0,
+            "offline_count": 0,
+            "failed_count": 0,
+            "duration_seconds": 0.0,
+            "message": "Tidak ada router terdaftar.",
+        }
+        return
+
+    sem = asyncio.Semaphore(concurrency)
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def _worker(idx: int, entry):
+        async with sem:
+            await queue.put({
+                "type": "checking",
+                "index": idx + 1,
+                "total": total,
+                "router_id": entry.id,
+                "ip": entry.host,
+                "name": entry.name,
+            })
+            res = await _reauth_single_router(
+                entry,
+                fetch_ssid=fetch_ssid,
+                timeout_sec=timeout_sec,
+            )
+            await queue.put({
+                "type": "result",
+                "index": idx + 1,
+                "total": total,
+                "item": res,
+            })
+
+    async def _producer():
+        tasks = [_worker(i, r) for i, r in enumerate(routers)]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await queue.put(None)
+
+    producer_task = asyncio.create_task(_producer())
+    success_count = 0
+    offline_count = 0
+    failed_count = 0
+    scanned_count = 0
+
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            if item.get("type") == "result":
+                scanned_count += 1
+                r = item.get("item", {})
+                st = r.get("status")
+                if st == "ok":
+                    success_count += 1
+                elif st == "offline":
+                    offline_count += 1
+                else:
+                    failed_count += 1
+                item["scanned_count"] = scanned_count
+                item["percent"] = int((scanned_count / total) * 100) if total else 100
+                item["success_count"] = success_count
+                item["offline_count"] = offline_count
+                item["failed_count"] = failed_count
+            yield item
+    finally:
+        if not producer_task.done():
+            producer_task.cancel()
+
+    duration = round(time.time() - t0, 2)
+    yield {
+        "type": "done",
+        "total": total,
+        "success_count": success_count,
+        "offline_count": offline_count,
+        "failed_count": failed_count,
+        "duration_seconds": duration,
+        "message": (
+            f"Re-Auth Massal selesai ({duration}s): "
+            f"{success_count} berhasil, {offline_count} offline, {failed_count} gagal."
+        ),
+    }
+
+
+@app.post(
+    "/routers/reauth-all-stream",
+    tags=["Routers"],
+    summary="Bulk re-authenticate all routers with live SSE stream",
+    description="Re-authenticate all routers concurrently with real-time SSE progress and auto-update SSID labels.",
+)
+async def reauth_all_routers_stream(payload: Optional[RouterBulkReauthPayload] = None):
+    """Stream live SSE events during bulk router re-authentication"""
+    import json
+    p = payload or RouterBulkReauthPayload()
+
+    async def event_generator():
+        try:
+            async for event in reauth_all_stream_generator(
+                concurrency=p.concurrency or 10,
+                timeout_sec=p.timeout_sec or 6.0,
+                fetch_ssid=True if p.fetch_ssid is None else p.fetch_ssid,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            err_event = {"type": "error", "message": str(e)}
+            yield f"data: {json.dumps(err_event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post(
+    "/routers/reauth-all",
+    response_model=RouterBulkReauthResponse,
+    tags=["Routers"],
+    summary="Bulk re-authenticate all routers",
+    description="Force re-authenticate all registered routers and update primary SSID labels.",
+)
+async def reauth_all_routers(payload: Optional[RouterBulkReauthPayload] = None):
+    """Bulk re-authenticate all registered routers"""
+    p = payload or RouterBulkReauthPayload()
+    routers = registry.list()
+    total = len(routers)
+    t0 = time.time()
+
+    if total == 0:
+        return RouterBulkReauthResponse(
+            total=0,
+            success_count=0,
+            offline_count=0,
+            failed_count=0,
+            duration_seconds=0.0,
+            items=[],
+            message="Tidak ada router terdaftar.",
+        )
+
+    concurrency = p.concurrency or 10
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _worker(r):
+        async with sem:
+            return await _reauth_single_router(
+                r,
+                fetch_ssid=True if p.fetch_ssid is None else p.fetch_ssid,
+                timeout_sec=p.timeout_sec or 6.0,
+            )
+
+    results = await asyncio.gather(*[_worker(r) for r in routers], return_exceptions=True)
+    items = []
+    success_count = 0
+    offline_count = 0
+    failed_count = 0
+
+    for res in results:
+        if isinstance(res, dict):
+            st = res.get("status")
+            if st == "ok":
+                success_count += 1
+            elif st == "offline":
+                offline_count += 1
+            else:
+                failed_count += 1
+            items.append(RouterBulkReauthItem(**res))
+
+    duration = round(time.time() - t0, 2)
+    return RouterBulkReauthResponse(
+        total=total,
+        success_count=success_count,
+        offline_count=offline_count,
+        failed_count=failed_count,
+        duration_seconds=duration,
+        items=items,
+        message=(
+            f"Re-Auth Massal selesai ({duration}s): "
+            f"{success_count} berhasil, {offline_count} offline, {failed_count} gagal."
+        ),
+    )
+
+
 @app.post(
     "/routers/{router_id}/reauth",
     response_model=RouterReauthResponse,
@@ -530,6 +1493,17 @@ async def reauth_router(router_id: str):
         client = get_client_for_router(router_id)
         client.reauth()
         latency = int((time.time() - t0) * 1000)
+        # Auto-update primary SSID in registry if available
+        try:
+            networks = client.get_wifi_networks()
+            if networks:
+                for net in networks:
+                    s = str(net.get("ssid") or "").strip()
+                    if s:
+                        registry.update_ssid(router_id, s)
+                        break
+        except Exception:
+            pass
         return RouterReauthResponse(
             success=True,
             latency_ms=latency,
@@ -605,6 +1579,12 @@ async def get_router_overview(router_id: str):
     dev = safe_call(lambda c: c.get_device_info(), None)
     pon = safe_call(lambda c: c.get_pon_data(), None)
     wifi = safe_call(lambda c: c.get_wifi_networks(), [])
+    if wifi:
+        for w in wifi:
+            if isinstance(w, dict) and w.get("ssid"):
+                registry.update_ssid(router_id, w["ssid"])
+                entry.ssid = w["ssid"]
+                break
     lan = safe_call(lambda c: c.get_lan_status(), [])
     wan = safe_call(lambda c: c.get_wan_status(), [])
     voip = safe_call(lambda c: c.get_voip_status(), [])
@@ -911,6 +1891,278 @@ async def get_full_status(
 
 
 # ==============================================================================
+# Configuration Backup & Decryption Endpoints
+# ==============================================================================
+
+@app.get(
+    "/routers/{router_id}/backup-config",
+    tags=["Configuration"],
+    summary="Download router config.bin",
+    description="Download the binary configuration backup file (config.bin) directly from the router.",
+)
+async def download_router_config(router_id: str):
+    """Download config.bin backup from router"""
+    entry = get_router_or_default(router_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Router '{router_id}' tidak ditemukan")
+
+    client = get_client_for_router(router_id)
+    ensure_client_logged_in(client)
+    try:
+        data = with_session_retry(lambda c: c.backup_config())(client)
+        filename = f"config_{entry.name or client.model or 'router'}_{router_id}.bin"
+        return Response(
+            content=data,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except ZTEClientError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mengunduh config.bin: {e}")
+
+
+@app.post(
+    "/routers/{router_id}/decrypt-config",
+    response_model=ConfigDecryptResponse,
+    tags=["Configuration"],
+    summary="Decrypt router config.bin and extract PPPoE credentials",
+    description="Download and decrypt the router's config.bin file, recovering plaintext PPPoE credentials, WiFi passwords, and admin accounts.",
+)
+async def decrypt_router_config(
+    router_id: str,
+    key: Optional[str] = Query(None, description="Custom AES key (jika diketahui)"),
+):
+    """Decrypt router config.bin to extract plaintext credentials"""
+    entry = get_router_or_default(router_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Router '{router_id}' tidak ditemukan")
+
+    client = get_client_for_router(router_id)
+    ensure_client_logged_in(client)
+
+    # Gather device info for key derivation
+    dev_sn, dev_mac = None, None
+    try:
+        dev_info = client.get_device_info()
+        dev_sn = dev_info.serial_number
+    except Exception:
+        pass
+
+    try:
+        data = with_session_retry(lambda c: c.backup_config())(client)
+    except ZTEClientError as e:
+        raise HTTPException(status_code=502, detail=f"Tidak dapat mengunduh config.bin dari router: {e}")
+
+    try:
+        xml_bytes, used_key = decrypt_config_bin(data, key=key, serial=dev_sn, mac=dev_mac)
+        extracted = extract_credentials_from_xml(xml_bytes)
+        preview = xml_bytes.decode("latin1", "replace")[:1000]
+        return ConfigDecryptResponse(
+            success=True,
+            router_id=router_id,
+            model=client.model,
+            encryption_key=used_key,
+            credentials=DecryptedCredentials(**extracted),
+            xml_preview=preview,
+        )
+    except ZTEConfigError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mendekripsi config.bin: {e}")
+
+
+@app.post(
+    "/decrypt-config",
+    response_model=ConfigDecryptResponse,
+    tags=["Configuration"],
+    summary="Decrypt uploaded config.bin",
+    description="Upload a config.bin file to decrypt and extract PPPoE credentials, WiFi passwords, and admin accounts.",
+)
+async def decrypt_uploaded_config(
+    file: UploadFile = File(..., description="ZTE config.bin file"),
+    key: Optional[str] = Query(None, description="Custom AES key (opsional)"),
+    serial: Optional[str] = Query(None, description="Router Serial Number (opsional)"),
+    mac: Optional[str] = Query(None, description="Router MAC Address (opsional)"),
+):
+    """Upload and decrypt any ZTE config.bin file"""
+    data = await file.read()
+    if len(data) < 16:
+        raise HTTPException(status_code=400, detail="Berkas terlalu kecil atau kosong")
+
+    try:
+        xml_bytes, used_key = decrypt_config_bin(data, key=key, serial=serial, mac=mac)
+        extracted = extract_credentials_from_xml(xml_bytes)
+        preview = xml_bytes.decode("latin1", "replace")[:1000]
+        return ConfigDecryptResponse(
+            success=True,
+            router_id=None,
+            model=file.filename,
+            encryption_key=used_key,
+            credentials=DecryptedCredentials(**extracted),
+            xml_preview=preview,
+        )
+    except ZTEConfigError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mendekripsi file: {e}")
+
+
+# ==============================================================================
+# Telnet & Factory Mode Endpoints
+# ==============================================================================
+
+class TelnetStatusResponse(BaseModel):
+    open: bool
+    port: int
+    latency_ms: Optional[float] = None
+    message: str
+
+
+class TelnetEnableRequest(BaseModel):
+    mode: int = Field(2, description="Factory mode (1=ops, 2=dev, 3=production, 4=user)")
+
+
+class TelnetEnableResponse(BaseModel):
+    success: bool
+    telnet_user: Optional[str] = None
+    telnet_pass: Optional[str] = None
+    message: str
+
+
+class TelnetExtractRequest(BaseModel):
+    username: Optional[str] = Field(None, description="Telnet username (default auto-try root/admin)")
+    password: Optional[str] = Field(None, description="Telnet password (default auto-try Zte521/admin)")
+    port: int = Field(23, description="Telnet port")
+    timeout: float = Field(8.0, description="Socket timeout in seconds")
+
+
+class TelnetCommandRequest(BaseModel):
+    command: str = Field(..., description="Shell or sendcmd command (e.g. 'sendcmd 1 DB p WANCP')")
+    username: Optional[str] = Field(None, description="Telnet username")
+    password: Optional[str] = Field(None, description="Telnet password")
+    port: int = Field(23, description="Telnet port")
+    timeout: float = Field(8.0, description="Socket timeout in seconds")
+
+
+class TelnetCommandResponse(BaseModel):
+    success: bool
+    command: str
+    output: str
+
+
+class TelnetExtractResponse(BaseModel):
+    success: bool
+    router_id: Optional[str] = None
+    credentials: DecryptedCredentials
+    raw_outputs: dict[str, str] = Field(default_factory=dict)
+
+
+@app.get(
+    "/routers/{router_id}/telnet/status",
+    response_model=TelnetStatusResponse,
+    tags=["Telnet"],
+    summary="Check Telnet port status",
+    description="Check whether port 23 (Telnet) is open and responsive on the specified router.",
+)
+async def get_router_telnet_status(router_id: str, port: int = Query(23, description="Port to probe")):
+    entry = get_router_or_default(router_id)
+    return test_telnet_port(entry.host, port=port)
+
+
+@app.post(
+    "/routers/{router_id}/telnet/enable-factory",
+    response_model=TelnetEnableResponse,
+    tags=["Telnet"],
+    summary="Enable Telnet via Factory Mode",
+    description="Trigger ZTE webFac / webFacEntry factory mode to turn on Telnet service and generate credentials.",
+)
+async def enable_router_telnet(router_id: str, req: TelnetEnableRequest = TelnetEnableRequest()):
+    entry = get_router_or_default(router_id)
+    res = enable_telnet_factory_mode(
+        host=entry.host,
+        port=entry.port,
+        username=entry.username,
+        password=entry.password,
+        mode=req.mode,
+    )
+    return TelnetEnableResponse(**res)
+
+
+@app.post(
+    "/routers/{router_id}/telnet/extract",
+    response_model=TelnetExtractResponse,
+    tags=["Telnet"],
+    summary="Extract credentials via Telnet (sendcmd)",
+    description="Connect via Telnet, authenticate, and execute sendcmd to extract PPPoE, WiFi, and Admin credentials.",
+)
+async def extract_router_telnet(router_id: str, req: TelnetExtractRequest = TelnetExtractRequest()):
+    entry = get_router_or_default(router_id)
+
+    # Determine login candidates
+    candidates = []
+    if req.username and req.password is not None:
+        candidates.append((req.username, req.password))
+    else:
+        candidates.extend([
+            ("root", "Zte521"),
+            ("root", "Pon521"),
+            ("admin", "admin"),
+            ("root", "root"),
+            (entry.username, entry.password),
+        ])
+
+    last_error = None
+    for user, pwd in candidates:
+        client = ZTETelnetClient(host=entry.host, port=req.port, timeout=req.timeout)
+        try:
+            client.connect()
+            client.login(user, pwd)
+            creds = client.extract_credentials()
+            client.close()
+            return TelnetExtractResponse(
+                success=True,
+                router_id=router_id,
+                credentials=DecryptedCredentials(
+                    pppoe=creds["pppoe"],
+                    admin=creds["admin"],
+                    wifi=creds["wifi"],
+                    tr069=[],
+                ),
+                raw_outputs=creds["raw_outputs"],
+            )
+        except Exception as e:
+            last_error = e
+            client.close()
+
+    raise HTTPException(status_code=422, detail=f"Gagal mengekstrak via Telnet: {last_error}")
+
+
+@app.post(
+    "/routers/{router_id}/telnet/command",
+    response_model=TelnetCommandResponse,
+    tags=["Telnet"],
+    summary="Run command via Telnet",
+    description="Execute an arbitrary shell or sendcmd command on the router via Telnet.",
+)
+async def run_router_telnet_command(router_id: str, req: TelnetCommandRequest):
+    entry = get_router_or_default(router_id)
+    user = req.username or "root"
+    pwd = req.password or "Zte521"
+
+    client = ZTETelnetClient(host=entry.host, port=req.port, timeout=req.timeout)
+    try:
+        client.connect()
+        client.login(user, pwd)
+        output = client.run_command(req.command, timeout=req.timeout)
+        client.close()
+        return TelnetCommandResponse(success=True, command=req.command, output=output)
+    except Exception as e:
+        client.close()
+        raise HTTPException(status_code=422, detail=f"Gagal menjalankan perintah telnet: {e}")
+
+
+# ==============================================================================
 # OpenAPI Schema Sanitization
 # ==============================================================================
 
@@ -957,3 +2209,8 @@ async def root_redirect():
 
 if os.path.exists(STATIC_DIR):
     app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

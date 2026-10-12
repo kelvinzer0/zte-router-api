@@ -38,17 +38,37 @@
     <div class="controls-card">
       <div class="controls-left">
         <label for="router-select">Pilih Router:</label>
-        <select id="router-select">
+        <div style="position:relative; display:inline-flex; align-items:center;">
+          <input 
+            type="text" 
+            id="router-filter-input" 
+            placeholder="🔍 Filter IP / SSID / Nama..." 
+            style="padding:0.38rem 1.7rem 0.38rem 0.65rem; border:1px solid var(--border); border-radius:var(--radius); font-size:0.85rem; width:210px; background:#fff;"
+            title="Ketik untuk memfilter daftar router secara instan (IP, nama, SSID, lokasi)"
+            autocomplete="off"
+          >
+          <button 
+            type="button" 
+            id="btn-clear-router-filter" 
+            style="position:absolute; right:0.4rem; background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:0.85rem; display:none; padding:0 0.2rem; line-height:1;"
+            title="Hapus filter pencarian"
+          >✕</button>
+        </div>
+        <select id="router-select" style="max-width:320px;">
           <option value="" disabled selected>Memuat daftar router...</option>
         </select>
+        <span id="router-filter-count" class="badge badge-neutral" style="display:none; font-size:0.75rem; font-weight:700;"></span>
         <span id="router-status-badge" class="badge badge-neutral">
           <span class="dot dot-gray"></span> Menunggu...
         </span>
         <button id="btn-test-conn" class="btn btn-sm" title="Uji konektivitas ke router ini">
           🔍 Uji Koneksi
         </button>
-        <button id="btn-reauth" class="btn btn-sm" title="Paksa login ulang dan segarkan sesi router">
+        <button id="btn-reauth" class="btn btn-sm" title="Paksa login ulang dan segarkan sesi router ini">
           🔑 Re-Auth
+        </button>
+        <button id="btn-reauth-all" class="btn btn-sm" style="background:#0284c7; color:#fff; border-color:#0369a1;" title="Re-Autentikasi seluruh router sekaligus & perbarui label SSID">
+          🔑 Re-Auth Massal
         </button>
       </div>
 
@@ -61,6 +81,12 @@
         </button>
         <button id="btn-delete-router" class="btn btn-sm btn-danger">
           🗑️ Hapus
+        </button>
+        <button id="btn-backup-all-csv" class="btn btn-sm" title="Backup seluruh router ke file CSV (Hanya IP, SSID, dan Password)">
+          📥 Backup CSV
+        </button>
+        <button id="btn-toggle-search-ssid" class="btn btn-sm" style="background:#7c3aed; color:#ffffff; border-color:#6d28d9;" title="Cari SSID di seluruh router (menampilkan IP dan password WiFi)">
+          🔍 Cari SSID
         </button>
         <div style="display:inline-flex; align-items:center; gap:0.4rem; margin-left:0.5rem;">
           <label for="refresh-interval">Refresh:</label>
@@ -77,9 +103,78 @@
       </div>
     </div>
 
+    <!-- Re-Auth Massal Live Progress Box -->
+    <div id="reauth-all-progress-box" class="card" style="display:none; margin-bottom:1.5rem; border-top:4px solid #0284c7; box-shadow:var(--shadow);">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; flex-wrap:wrap; gap:0.5rem;">
+        <div>
+          <h3 style="margin:0; font-size:1.05rem; display:flex; align-items:center; gap:0.5rem; color:#0369a1;">
+            <span>🔑</span> Progres Re-Auth Massal Seluruh Router
+          </h3>
+          <p style="margin:0.25rem 0 0 0; font-size:0.8rem; color:var(--text-muted);">
+            Menyegarkan sesi autentikasi dan mendeteksi nama SSID WiFi untuk seluruh router terdaftar secara bersamaan.
+          </p>
+        </div>
+        <div style="display:flex; gap:0.5rem; align-items:center;">
+          <button type="button" id="btn-stop-reauth-all" class="btn btn-sm btn-danger" style="display:none;">⏹️ Hentikan</button>
+          <button type="button" id="btn-close-reauth-all" class="btn btn-sm btn-outline">✕ Tutup</button>
+        </div>
+      </div>
+
+      <!-- Status Text & Percent Badge -->
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem; flex-wrap:wrap; gap:0.5rem;">
+        <span style="font-weight:700; font-size:0.92rem; color:var(--text-main);" id="reauth-all-status-text">⏳ Memulai Re-Auth Massal...</span>
+        <span id="reauth-all-badge" class="badge badge-neutral" style="font-weight:700; font-size:0.85rem;">0 / 0 Router (0%)</span>
+      </div>
+
+      <!-- Animated Progress Bar -->
+      <div style="height:10px; background:var(--bg-page, #e2e8f0); border-radius:5px; overflow:hidden; margin-bottom:0.85rem;">
+        <div id="reauth-all-bar" style="height:100%; width:0%; background:#0284c7; transition:width 0.25s ease;"></div>
+      </div>
+
+      <!-- Metric Stat Badges -->
+      <div style="display:flex; gap:0.6rem; flex-wrap:wrap; align-items:center; margin-bottom:1rem; font-size:0.85rem;">
+        <span id="reauth-stat-total" class="badge badge-neutral">Total: 0</span>
+        <span id="reauth-stat-processed" class="badge badge-neutral">Diproses: 0</span>
+        <span id="reauth-stat-success" class="badge badge-online" style="font-weight:700; background:#dcfce7; color:#15803d;">✓ Berhasil: 0</span>
+        <span id="reauth-stat-ssid" class="badge badge-neutral" style="font-weight:700; background:#ede9fe; color:#6d28d9;">📶 SSID Ditemukan: 0</span>
+        <span id="reauth-stat-offline" class="badge badge-offline" style="background:#fee2e2; color:#991b1b;">✕ Offline: 0</span>
+        <span id="reauth-stat-failed" class="badge badge-warn" style="background:#fef3c7; color:#92400e;">⚠️ Gagal: 0</span>
+      </div>
+
+      <!-- Live Router Re-Auth Table -->
+      <div style="overflow-x:auto; max-height:360px; overflow-y:auto; border:1px solid var(--border); border-radius:6px;">
+        <table style="width:100%; border-collapse:collapse; font-size:0.85rem; text-align:left;">
+          <thead style="background:var(--bg-card); position:sticky; top:0; border-bottom:2px solid var(--border); z-index:2;">
+            <tr>
+              <th style="padding:0.6rem 0.75rem;">IP Router</th>
+              <th style="padding:0.6rem 0.75rem;">Nama &amp; Model</th>
+              <th style="padding:0.6rem 0.75rem;">Status Re-Auth</th>
+              <th style="padding:0.6rem 0.75rem;">SSID Terdeteksi</th>
+              <th style="padding:0.6rem 0.75rem;">Latensi / Pesan</th>
+            </tr>
+          </thead>
+          <tbody id="reauth-all-tbody">
+            <tr>
+              <td colspan="5" style="padding:1.5rem; text-align:center; color:var(--text-muted);">
+                Menunggu proses re-auth dimulai...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Inline Router Management Form (NON-MODAL) -->
     <div id="router-form-card" class="inline-form-card" style="display:none">
       <h3 id="form-title">Tambah Router Baru</h3>
+
+      <!-- Mode Tabs (Only visible when adding router, hidden during edit) -->
+      <div id="router-mode-tabs" style="display:flex; gap:0.5rem; margin-bottom:1.25rem; border-bottom:1px solid var(--border); padding-bottom:0.75rem;">
+        <button type="button" id="tab-mode-single" class="btn btn-sm btn-primary">Satu Router (Single IP)</button>
+        <button type="button" id="tab-mode-range" class="btn btn-sm">Range IP / Subnet (CIDR)</button>
+      </div>
+
+      <!-- Single Router Form -->
       <form id="router-form" novalidate>
         <input type="hidden" id="form-id">
         <div class="form-grid">
@@ -95,13 +190,71 @@
             <label for="form-port">Port</label>
             <input type="number" id="form-port" value="80" min="1" max="65535">
           </div>
-          <div class="form-group">
-            <label for="form-username">Username</label>
-            <input type="text" id="form-username" value="admin">
-          </div>
-          <div class="form-group">
-            <label for="form-password">Password</label>
-            <input type="password" id="form-password" placeholder="Kosongkan jika tidak diubah">
+          <!-- Credential Mode Selector for Single Router -->
+          <div class="form-group" style="grid-column: 1 / -1; background:#eff6ff; padding:0.85rem 1rem; border:1px solid #bfdbfe; border-radius:var(--radius);">
+            <label style="color:var(--text-main); font-weight:700; margin-bottom:0.5rem; display:block;">Mode Kredensial Login:</label>
+            <div style="display:flex; gap:1.5rem; margin-bottom:0.6rem;">
+              <label style="display:inline-flex; align-items:center; gap:0.5rem; cursor:pointer; font-weight:600; color:var(--text-main);">
+                <input type="radio" name="single-cred-mode" id="single-cred-auto" value="auto" checked>
+                <span>🤖 Otomatis (Berdasarkan Model)</span>
+              </label>
+              <label style="display:inline-flex; align-items:center; gap:0.5rem; cursor:pointer; font-weight:600; color:var(--text-main);">
+                <input type="radio" name="single-cred-mode" id="single-cred-manual" value="manual">
+                <span>✏️ Manual (Kustom)</span>
+              </label>
+            </div>
+
+            <!-- Auto mode preset box -->
+            <div id="single-cred-auto-box" style="font-size:0.85rem; background:#dbeafe; border-radius:6px; padding:0.75rem;">
+              <div style="font-weight:700; margin-bottom:0.4rem; color:#1e3a8a;">Pilih Model Router / Deteksi:</div>
+              <div style="display:flex; flex-direction:column; gap:0.45rem;">
+                <label style="display:inline-flex; align-items:center; gap:0.5rem; cursor:pointer;">
+                  <input type="radio" name="single-auto-preset" id="preset-f609" value="F609" checked>
+                  <span>
+                    <strong style="background:#0369a1; color:#fff; border-radius:4px; padding:0.15rem 0.5rem; font-size:0.78rem;">ZTE F609</strong>
+                    &nbsp;User: <code>admin</code> / Password: <code>admin</code>
+                  </span>
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:0.5rem; cursor:pointer;">
+                  <input type="radio" name="single-auto-preset" id="preset-f677v2" value="F677V2">
+                  <span>
+                    <strong style="background:#15803d; color:#fff; border-radius:4px; padding:0.15rem 0.5rem; font-size:0.78rem;">ZTE F677V2</strong>
+                    &nbsp;User: <code>superadmin</code> / Password: <code>suportadmin</code>
+                  </span>
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:0.5rem; cursor:pointer;">
+                  <input type="radio" name="single-auto-preset" id="preset-f477v2" value="F477V2">
+                  <span>
+                    <strong style="background:#7c3aed; color:#fff; border-radius:4px; padding:0.15rem 0.5rem; font-size:0.78rem;">ZTE F477V2</strong>
+                    &nbsp;User: <code>Administrator</code> / Password: <code>suportadmin</code>
+                  </span>
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:0.5rem; cursor:pointer;">
+                  <input type="radio" name="single-auto-preset" id="preset-autodetect" value="auto">
+                  <span>
+                    <strong style="background:#4b5563; color:#fff; border-radius:4px; padding:0.15rem 0.5rem; font-size:0.78rem;">🔍 Deteksi Otomatis</strong>
+                    &nbsp;Otomatis tes IP untuk mendeteksi F609 vs F677V2 vs F477V2
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Manual mode fields (or hidden during auto) -->
+            <div id="single-cred-manual-box" style="display:none; margin-top:0.6rem;">
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;">
+                <div>
+                  <label for="form-username" style="font-size:0.85rem; font-weight:600;">Username</label>
+                  <input type="text" id="form-username" value="admin" style="width:100%; margin-top:0.25rem;">
+                </div>
+                <div>
+                  <label for="form-password" style="font-size:0.85rem; font-weight:600;">Password</label>
+                  <input type="password" id="form-password" placeholder="Kosongkan jika tidak diubah" style="width:100%; margin-top:0.25rem;">
+                </div>
+              </div>
+              <small style="color:var(--text-muted); display:block; margin-top:0.35rem;">
+                Gunakan kredensial manual jika router telah diubah dari username/password default.
+              </small>
+            </div>
           </div>
           <div class="form-group">
             <label for="form-timeout">Timeout (detik)</label>
@@ -121,6 +274,288 @@
           <button type="button" id="btn-cancel-form" class="btn">Batal</button>
         </div>
       </form>
+
+      <!-- Range IP / CIDR Scan & Add Form -->
+      <form id="router-range-form" style="display:none" novalidate>
+        <div class="form-grid">
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label for="range-cidr">Range IP / CIDR Subnet <span style="color:red">*</span></label>
+            <input type="text" id="range-cidr" placeholder="Mis. 10.200.204.0/24 atau 10.200.204.1-254" required>
+            <small style="color:var(--text-muted); display:block; margin-top:0.25rem;">
+              Format CIDR (contoh: <code>10.200.204.0/24</code>) atau rentang IP (contoh: <code>10.200.204.1-10.200.204.254</code> atau <code>10.200.204.1-254</code>).
+            </small>
+          </div>
+
+          <div class="form-group" style="grid-column: 1 / -1; background:#f8fafc; padding:0.75rem; border:1px solid var(--border); border-radius:var(--radius);">
+            <label style="color:var(--text-main); font-weight:700;">Filter Model Perangkat (F609, F677V2, F477V2):</label>
+            <div style="display:flex; flex-wrap:wrap; gap:1.5rem; align-items:center; margin-top:0.35rem;">
+              <label style="display:inline-flex; align-items:center; gap:0.4rem; cursor:pointer; color:var(--text-main);">
+                <input type="checkbox" id="range-filter-f609" value="F609" checked>
+                <span><strong>ZTE F609</strong> (MD5 Auth)</span>
+              </label>
+              <label style="display:inline-flex; align-items:center; gap:0.4rem; cursor:pointer; color:var(--text-main);">
+                <input type="checkbox" id="range-filter-f677v2" value="F677V2" checked>
+                <span><strong>ZTE F677V2</strong> (SHA256 Auth)</span>
+              </label>
+              <label style="display:inline-flex; align-items:center; gap:0.4rem; cursor:pointer; color:var(--text-main);">
+                <input type="checkbox" id="range-filter-f477v2" value="F477V2" checked>
+                <span><strong>ZTE F477V2</strong> (SHA256 CU Auth)</span>
+              </label>
+            </div>
+            <small style="color:var(--text-muted); display:block; margin-top:0.35rem;">
+              🔒 <em>Hanya perangkat yang teridentifikasi sebagai ZTE F609, ZTE F677V2, atau ZTE F477V2 yang akan ditambahkan ke sistem. Perangkat model lain otomatis dilewati.</em>
+            </small>
+          </div>
+
+          <!-- Credential Mode Selector -->
+          <div class="form-group" style="grid-column: 1 / -1; background:#eff6ff; padding:0.85rem 1rem; border:1px solid #bfdbfe; border-radius:var(--radius);">
+            <label style="color:var(--text-main); font-weight:700; display:block; margin-bottom:0.5rem;">Mode Kredensial Login</label>
+            <div style="display:flex; flex-wrap:wrap; gap:1rem; margin-bottom:0.5rem;">
+              <label style="display:inline-flex; align-items:center; gap:0.5rem; cursor:pointer; font-weight:600; color:var(--text-main);">
+                <input type="radio" name="range-cred-mode" id="range-cred-auto" value="auto" checked>
+                <span>🤖 Otomatis (default)</span>
+              </label>
+              <label style="display:inline-flex; align-items:center; gap:0.5rem; cursor:pointer; font-weight:600; color:var(--text-main);">
+                <input type="radio" name="range-cred-mode" id="range-cred-manual" value="manual">
+                <span>✏️ Manual (kustom)</span>
+              </label>
+            </div>
+            <!-- Auto mode info -->
+            <div id="range-cred-auto-info" style="font-size:0.82rem; background:#dbeafe; border-radius:6px; padding:0.6rem 0.75rem;">
+              <strong>Kredensial Otomatis akan digunakan:</strong>
+              <div style="display:flex; gap:1.5rem; margin-top:0.35rem; flex-wrap:wrap;">
+                <div>
+                  <span style="background:#0369a1; color:#fff; border-radius:4px; padding:0.15rem 0.5rem; font-size:0.78rem; font-weight:700;">ZTE F609</span>
+                  &nbsp;user: <code>admin</code> / pass: <code>admin</code>
+                </div>
+                <div>
+                  <span style="background:#15803d; color:#fff; border-radius:4px; padding:0.15rem 0.5rem; font-size:0.78rem; font-weight:700;">ZTE F677V2</span>
+                  &nbsp;user: <code>superadmin</code> / pass: <code>suportadmin</code>
+                </div>
+                <div>
+                  <span style="background:#7c3aed; color:#fff; border-radius:4px; padding:0.15rem 0.5rem; font-size:0.78rem; font-weight:700;">ZTE F477V2</span>
+                  &nbsp;user: <code>Administrator</code> / pass: <code>suportadmin</code>
+                </div>
+              </div>
+              <div style="color:#1e40af; margin-top:0.35rem; font-size:0.78rem;">
+                💡 Perangkat F609 akan menggunakan MD5 auth, F677V2 & F477V2 menggunakan SHA256 auth. Kredensial di-set secara otomatis sesuai tipe yang terdeteksi.
+              </div>
+            </div>
+            <!-- Manual mode fields -->
+            <div id="range-cred-manual-fields" style="display:none; margin-top:0.5rem;">
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;">
+                <div>
+                  <label for="range-username" style="font-size:0.82rem;">Username (untuk semua perangkat)</label>
+                  <input type="text" id="range-username" value="admin" style="width:100%; margin-top:0.2rem;">
+                </div>
+                <div>
+                  <label for="range-password" style="font-size:0.82rem;">Password</label>
+                  <input type="password" id="range-password" placeholder="Password admin" style="width:100%; margin-top:0.2rem;">
+                </div>
+              </div>
+              <small style="color:#b45309; display:block; margin-top:0.35rem;">
+                ⚠️ Mode manual: semua perangkat yang ditemukan akan dicoba dengan username & password yang sama, sistem akan mencoba MD5 (F609) dan SHA256 (F677V2) secara bergantian.
+              </small>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="range-name-tpl">Format Nama Router</label>
+            <input type="text" id="range-name-tpl" value="ZTE {model} ({ip})">
+            <small style="color:var(--text-muted); display:block; margin-top:0.25rem;">Placeholder: <code>{model}</code>, <code>{ip}</code></small>
+          </div>
+
+          <div class="form-group">
+            <label for="range-port">Port Web</label>
+            <input type="number" id="range-port" value="80" min="1" max="65535">
+          </div>
+
+          <div class="form-group">
+            <label for="range-timeout">Timeout per IP (detik)</label>
+            <input type="number" id="range-timeout" value="2" min="1" max="10" step="0.5">
+          </div>
+
+          <div class="form-group">
+            <label for="range-location">Lokasi</label>
+            <input type="text" id="range-location" placeholder="Mis. Subnet Pelanggan">
+          </div>
+
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label for="range-notes">Catatan</label>
+            <input type="text" id="range-notes" placeholder="Catatan tambahan untuk router hasil scan">
+          </div>
+        </div>
+
+        <div class="form-actions" style="margin-top:1rem;">
+          <button type="submit" id="btn-start-range-scan" class="btn btn-primary">🔍 Scan & Tambah Router</button>
+          <button type="button" id="btn-cancel-range-form" class="btn">Batal</button>
+        </div>
+      </form>
+
+      <!-- Range Scan Progress & Live Results Box -->
+      <div id="range-scan-box" style="display:none; margin-top:1.25rem; border-top:1px solid var(--border); padding-top:1rem;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+          <div style="font-weight:700; font-size:0.95rem;" id="range-scan-status">
+            ⏳ Memindai subnet...
+          </div>
+          <div id="range-scan-badge" class="badge badge-neutral">0 / 0 IP (0%)</div>
+        </div>
+
+        <!-- Progress bar container -->
+        <div style="background:#e2e8f0; border-radius:9999px; height:8px; width:100%; overflow:hidden; margin-bottom:0.75rem;">
+          <div id="range-scan-bar" style="background:var(--primary); height:100%; width:0%; transition: width 0.2s ease;"></div>
+        </div>
+
+        <!-- Metric counter badges -->
+        <div style="display:flex; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.75rem;">
+          <span class="badge badge-neutral" id="scan-stat-scanned">Dipindai: 0</span>
+          <span class="badge badge-online" id="scan-stat-found">Ditemukan: 0</span>
+          <span class="badge badge-online" id="scan-stat-added" style="background:#bbf7d0;">Ditambahkan: 0</span>
+          <span class="badge badge-warn" id="scan-stat-exists">Sudah Ada: 0</span>
+        </div>
+
+        <!-- Live discovery table -->
+        <div style="max-height:240px; overflow-y:auto; border:1px solid var(--border); border-radius:var(--radius); background:#fff;">
+          <table style="width:100%; border-collapse:collapse; font-size:0.85rem;" id="range-scan-table">
+            <thead>
+              <tr style="background:#f1f5f9; text-align:left; border-bottom:1px solid var(--border);">
+                <th style="padding:0.4rem 0.6rem;">IP</th>
+                <th style="padding:0.4rem 0.6rem;">Model</th>
+                <th style="padding:0.4rem 0.6rem;">Nama Router</th>
+                <th style="padding:0.4rem 0.6rem;">Username</th>
+                <th style="padding:0.4rem 0.6rem;">Status</th>
+              </tr>
+            </thead>
+            <tbody id="range-scan-tbody">
+              <tr>
+                <td colspan="5" style="padding:1rem; text-align:center; color:var(--text-muted);">
+                  Menunggu perangkat ditemukan...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Inline SSID Search Panel (NON-MODAL) -->
+    <div id="ssid-search-card" class="inline-form-card" style="display:none; border-top: 4px solid #7c3aed;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; flex-wrap:wrap; gap:0.5rem;">
+        <h3 style="margin:0; display:flex; align-items:center; gap:0.5rem; color:#6d28d9;">
+          <span>🔍</span> Cari SSID di Seluruh Router (IP Locator)
+        </h3>
+        <button type="button" id="btn-close-ssid-search" class="btn btn-sm btn-outline">✕ Tutup</button>
+      </div>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:0; margin-bottom:1rem;">
+        Temukan di alamat IP mana suatu SSID / WiFi berada. Fitur ini secara otomatis melakukan <strong>Re-Auth per router</strong> agar sesi login segar dan ekstraksi SSID &amp; Password akurat.
+      </p>
+
+      <form id="ssid-search-form" novalidate>
+        <div class="form-grid">
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label for="search-ssid-query">Nama SSID / WiFi yang Dicari <span style="color:red">*</span></label>
+            <div style="display:flex; gap:0.5rem; margin-top:0.25rem;">
+              <input type="text" id="search-ssid-query" placeholder="Ketik nama SSID (mis. MyWiFi, Kantor, atau kosongan / * untuk semua SSID)..." required style="flex:1;">
+              <button type="submit" id="btn-start-ssid-search" class="btn btn-primary" style="background:#7c3aed; border-color:#6d28d9; white-space:nowrap; padding:0 1.25rem;">
+                🔍 Mulai Cari
+              </button>
+              <button type="button" id="btn-stop-ssid-search" class="btn btn-danger" style="display:none; white-space:nowrap;">
+                ⏹️ Hentikan
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Metode Pencocokan</label>
+            <div style="display:flex; gap:1.25rem; align-items:center; margin-top:0.4rem;">
+              <label style="display:inline-flex; align-items:center; gap:0.35rem; font-weight:normal; font-size:0.85rem; cursor:pointer;">
+                <input type="radio" name="search-ssid-match-mode" value="contains" checked> Mengandung Kata (Substring)
+              </label>
+              <label style="display:inline-flex; align-items:center; gap:0.35rem; font-weight:normal; font-size:0.85rem; cursor:pointer;">
+                <input type="radio" name="search-ssid-match-mode" value="exact"> Persis (Exact Match)
+              </label>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Otentikasi Router</label>
+            <div style="margin-top:0.4rem;">
+              <label style="display:inline-flex; align-items:center; gap:0.35rem; font-weight:normal; font-size:0.85rem; cursor:pointer;">
+                <input type="checkbox" id="search-ssid-reauth" checked> <strong>Paksa Re-Auth 1 per 1</strong> (Login ulang segar)
+              </label>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="search-ssid-concurrency">Kecepatan Pemrosesan</label>
+            <select id="search-ssid-concurrency" style="width:100%; margin-top:0.25rem;">
+              <option value="1">1 Router per waktu (Urutan Murni 1-per-1)</option>
+              <option value="3">3 Router bersamaan</option>
+              <option value="5" selected>5 Router bersamaan (Standar Stabil & Cepat)</option>
+              <option value="10">10 Router bersamaan (Cepat)</option>
+              <option value="20">20 Router bersamaan (Sangat Cepat)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="search-ssid-timeout">Timeout per Router</label>
+            <select id="search-ssid-timeout" style="width:100%; margin-top:0.25rem;">
+              <option value="3">3 detik (Cepat)</option>
+              <option value="6" selected>6 detik (Standar)</option>
+              <option value="10">10 detik (Koneksi Lambat)</option>
+            </select>
+          </div>
+        </div>
+      </form>
+
+      <!-- Live Progress Box -->
+      <div id="ssid-search-progress-box" style="display:none; margin-top:1.25rem; border-top:1px solid var(--border); padding-top:1rem;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem; flex-wrap:wrap; gap:0.5rem;">
+          <div style="font-weight:700; font-size:0.95rem; color:#6d28d9;" id="ssid-search-status-text">
+            ⏳ Memeriksa router...
+          </div>
+          <span id="ssid-search-badge" class="badge badge-neutral">0 / 0 Router (0%)</span>
+        </div>
+
+        <!-- Progress Bar -->
+        <div style="height:8px; background:var(--bg-page, #e2e8f0); border-radius:4px; overflow:hidden; margin-bottom:0.75rem;">
+          <div id="ssid-search-bar" style="height:100%; width:0%; background:#7c3aed; transition:width 0.25s ease;"></div>
+        </div>
+
+        <!-- Stat Badges -->
+        <div style="display:flex; gap:0.6rem; flex-wrap:wrap; align-items:center; margin-bottom:1rem; font-size:0.85rem;">
+          <span id="ssid-stat-scanned" class="badge badge-neutral">Diperiksa: 0</span>
+          <span id="ssid-stat-matched" class="badge badge-online" style="font-weight:700; background:#dcfce7; color:#15803d;">Ditemukan: 0</span>
+          <span id="ssid-stat-offline" class="badge badge-offline" style="background:#fee2e2; color:#991b1b;">Offline: 0</span>
+          <span id="ssid-stat-error" class="badge badge-warn" style="background:#fef3c7; color:#92400e;">Gagal/Auth: 0</span>
+          <button type="button" id="btn-export-search-results-csv" class="btn btn-sm btn-outline" style="margin-left:auto; display:none;">
+            📥 Export Hasil Pencarian ke CSV
+          </button>
+        </div>
+
+        <!-- Live Discovered Matches Table -->
+        <div style="overflow-x:auto; max-height:420px; overflow-y:auto; border:1px solid var(--border); border-radius:6px;">
+          <table style="width:100%; border-collapse:collapse; font-size:0.85rem; text-align:left;">
+            <thead style="background:var(--bg-card); position:sticky; top:0; border-bottom:2px solid var(--border); z-index:2;">
+              <tr>
+                <th style="padding:0.6rem 0.75rem;">IP Router</th>
+                <th style="padding:0.6rem 0.75rem;">Nama &amp; Model</th>
+                <th style="padding:0.6rem 0.75rem;">SSID Cocok</th>
+                <th style="padding:0.6rem 0.75rem;">Password WiFi</th>
+                <th style="padding:0.6rem 0.75rem;">Status &amp; Keamanan</th>
+                <th style="padding:0.6rem 0.75rem; text-align:right;">Aksi</th>
+              </tr>
+            </thead>
+            <tbody id="ssid-search-tbody">
+              <tr>
+                <td colspan="6" style="padding:1.5rem; text-align:center; color:var(--text-muted);">
+                  Menunggu pencarian dimulai...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <!-- Inline Delete Confirmation (NON-MODAL) -->
@@ -141,9 +576,19 @@
     <main id="main-content">
       <!-- 1. WIFI NETWORKS HIGHLIGHT CARD -->
       <section class="card" style="border-top: 4px solid var(--primary);">
-        <div class="card-header">
-          <h2><span>📶</span> Konfigurasi Jaringan WiFi</h2>
-          <span id="wifi-count-badge" class="badge badge-neutral">0 SSID</span>
+        <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <h2><span>📶</span> Konfigurasi Jaringan WiFi</h2>
+            <span id="wifi-count-badge" class="badge badge-neutral">0 SSID</span>
+          </div>
+          <div style="display:flex; gap:0.5rem; align-items:center;">
+            <button id="btn-export-single-wifi-csv" class="btn btn-sm btn-outline" title="Backup CSV WiFi router yang dipilih (Hanya IP, SSID, dan Password)">
+              📥 Backup CSV (Router Ini)
+            </button>
+            <button id="btn-export-all-wifi-csv" class="btn btn-sm btn-primary" title="Backup CSV WiFi SEMUA router di sistem (Hanya IP, SSID, dan Password)">
+              📥 Backup CSV Semua Router
+            </button>
+          </div>
         </div>
         <div class="card-body">
           <div id="wifi-grid" class="wifi-grid">
@@ -190,6 +635,8 @@
         <button class="tab-btn active" data-tab="tab-overview">Ringkasan Perangkat</button>
         <button class="tab-btn" data-tab="tab-wan">Koneksi WAN</button>
         <button class="tab-btn" data-tab="tab-lan">Port LAN</button>
+        <button class="tab-btn" data-tab="tab-telnet">📟 Telnet & sendcmd</button>
+        <button class="tab-btn" data-tab="tab-config">🔐 Backup & Dekripsi</button>
         <button class="tab-btn" data-tab="tab-raw">Raw JSON</button>
       </div>
 
@@ -275,6 +722,126 @@
         </div>
       </div>
 
+      <!-- Tab: Telnet Console & Extractor -->
+      <div id="tab-telnet" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <h3><span>📟</span> Konsol Telnet & Pemulihan Password via sendcmd</h3>
+          </div>
+          <div class="card-body">
+            <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom:1.5rem; line-height:1.5;">
+              Akses Telnet memungkinkan pembacaan database internal router secara langsung menggunakan utilitas bawaan ZTE (<code>sendcmd</code>). Fitur ini mengekstrak kata sandi PPPoE dalam bentuk teks asli (plaintext), kredensial superadmin, dan kunci WiFi.
+            </p>
+
+            <!-- 1. Telnet Status & Factory Enabler -->
+            <div style="background:var(--bg-subtle, #1a1e24); padding:1.25rem; border-radius:8px; border:1px solid var(--border-color, #2d3748); margin-bottom:1.5rem;">
+              <h4 style="margin-top:0; font-size:0.95rem; margin-bottom:0.75rem;">1. Status Port & Aktivasi Telnet</h4>
+              <div style="display:flex; flex-wrap:wrap; gap:0.75rem; align-items:center; margin-bottom:0.75rem;">
+                <div style="display:inline-flex; align-items:center; gap:8px;">
+                  <span style="font-size:0.85rem; color:var(--text-muted);">Port:</span>
+                  <input type="number" id="telnet-port-input" value="23" style="width:80px; padding:6px 8px; font-size:0.85rem;">
+                </div>
+                <button type="button" id="btn-check-telnet" class="btn btn-sm btn-outline">
+                  <span>🔍</span> Cek Status Port 23
+                </button>
+                <button type="button" id="btn-enable-factory-telnet" class="btn btn-sm btn-primary">
+                  <span>🔓</span> Aktifkan Telnet via Factory Mode (/webFac)
+                </button>
+              </div>
+              <div id="telnet-status-display" style="font-size:0.85rem; padding:8px 12px; border-radius:6px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); display:none;"></div>
+            </div>
+
+            <!-- 2. Credential Extraction via sendcmd -->
+            <div style="background:var(--bg-subtle, #1a1e24); padding:1.25rem; border-radius:8px; border:1px solid var(--border-color, #2d3748); margin-bottom:1.5rem;">
+              <h4 style="margin-top:0; font-size:0.95rem; margin-bottom:0.75rem;">2. Ekstraksi Kredensial Otomatis (sendcmd)</h4>
+              <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
+                Login Telnet otomatis mencoba akun standar ZTE (<code>root / Zte521</code>, <code>root / Pon521</code>, <code>admin / admin</code>) atau kredensial kustom di bawah:
+              </p>
+              <div style="display:flex; flex-wrap:wrap; gap:0.75rem; align-items:center; margin-bottom:1rem;">
+                <input type="text" id="telnet-user-input" placeholder="User (kosongkan = otomatis)" style="flex:1; min-width:180px; padding:6px 10px; font-size:0.85rem;">
+                <input type="password" id="telnet-pass-input" placeholder="Password (kosongkan = otomatis)" style="flex:1; min-width:180px; padding:6px 10px; font-size:0.85rem;">
+                <button type="button" id="btn-extract-telnet" class="btn btn-primary" style="display:inline-flex; align-items:center; gap:6px;">
+                  <span>⚡</span> Ekstrak Kredensial (sendcmd)
+                </button>
+              </div>
+
+              <!-- Telnet Result Container -->
+              <div id="telnet-result-box" style="display:none; margin-top:1rem;">
+                <h4 style="font-size:0.95rem; margin-bottom:0.75rem;">Kredensial Ditemukan:</h4>
+                <div id="telnet-credentials-container"></div>
+              </div>
+            </div>
+
+            <!-- 3. Interactive Command Runner -->
+            <div style="background:var(--bg-subtle, #1a1e24); padding:1.25rem; border-radius:8px; border:1px solid var(--border-color, #2d3748); margin-bottom:1.5rem;">
+              <h4 style="margin-top:0; font-size:0.95rem; margin-bottom:0.75rem;">3. Jalankan Perintah Telnet / Shell Kustom</h4>
+              <div style="display:flex; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.75rem;">
+                <span style="font-size:0.8rem; color:var(--text-muted); align-self:center;">Preset:</span>
+                <button type="button" class="btn btn-sm btn-outline telnet-preset-btn" data-cmd="sendcmd 1 DB p WANCP">WANCP (PPPoE)</button>
+                <button type="button" class="btn btn-sm btn-outline telnet-preset-btn" data-cmd="sendcmd 1 DB p DevAuthInfo">DevAuthInfo (Admin)</button>
+                <button type="button" class="btn btn-sm btn-outline telnet-preset-btn" data-cmd="sendcmd 1 DB p KeyPassphrase">KeyPassphrase (WiFi)</button>
+                <button type="button" class="btn btn-sm btn-outline telnet-preset-btn" data-cmd="sendcmd 1 DB p TelnetCfg">TelnetCfg</button>
+              </div>
+              <div style="display:flex; gap:0.75rem; align-items:center; margin-bottom:1rem;">
+                <input type="text" id="telnet-cmd-input" value="sendcmd 1 DB p WANCP" style="flex:1; padding:7px 12px; font-family:monospace; font-size:0.9rem;">
+                <button type="button" id="btn-run-telnet-cmd" class="btn btn-primary">Kirim</button>
+              </div>
+              <pre id="telnet-terminal-output" style="background:#0d1117; color:#58a6ff; padding:1rem; border-radius:6px; font-family:monospace; font-size:0.85rem; max-height:300px; overflow-y:auto; white-space:pre-wrap; border:1px solid #30363d; display:none;"></pre>
+            </div>
+
+            <!-- Tips & Troubleshooting -->
+            <div style="padding:1rem; border-radius:8px; background:rgba(56, 139, 253, 0.08); border:1px solid rgba(56, 139, 253, 0.2);">
+              <h5 style="margin-top:0; margin-bottom:0.5rem; color:#58a6ff;">💡 Catatan Penting Mengenai Telnet ZTE:</h5>
+              <ul style="margin:0; padding-left:1.25rem; font-size:0.85rem; color:var(--text-muted); line-height:1.6;">
+                <li><strong>LAN vs WAN:</strong> Router ZTE secara default <em>memblokir</em> port 23 dari antarmuka WAN. Jika router diakses melalui IP WAN (misal <code>10.200.204.1</code>), port 23 akan menolak koneksi. Sambungkan komputer langsung ke port LAN atau WiFi router (biasanya <code>192.168.1.1</code>) untuk koneksi Telnet tanpa batasan firewall.</li>
+                <li><strong>Factory Mode:</strong> Tombol <em>Aktifkan Telnet via Factory Mode</em> akan memicu endpoint internal <code>/webFac</code> router untuk membuka port telnet dan menghasilkan kredensial sementara.</li>
+              </ul>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Backup & Dekripsi Config -->
+      <div id="tab-config" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <h3><span>🔐</span> Backup & Pemulihan Password PPPoE (config.bin)</h3>
+          </div>
+          <div class="card-body">
+            <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom:1.5rem; line-height:1.5;">
+              Router ZTE seringkali menyembunyikan atau menyamarkan kata sandi PPPoE (misal tanda <code>******</code> pada F677V2 atau halaman disembunyikan pada F609). 
+              Gunakan fitur ini untuk mengunduh berkas cadangan <code>config.bin</code> langsung dari router atau mendekripsi berkas guna memulihkan akun PPPoE dan WiFi dalam teks asli (plaintext).
+            </p>
+
+            <div style="display:flex; flex-wrap:wrap; gap:1rem; margin-bottom:1.5rem;">
+              <button type="button" id="btn-download-config" class="btn btn-outline" style="display:inline-flex; align-items:center; gap:6px;">
+                <span>📥</span> Unduh Backup config.bin
+              </button>
+              <button type="button" id="btn-decrypt-router-config" class="btn btn-primary" style="display:inline-flex; align-items:center; gap:6px;">
+                <span>🔓</span> Dekripsi Otomatis dari Router
+              </button>
+            </div>
+
+            <!-- Upload Custom File -->
+            <div style="background:var(--bg-subtle, #1a1e24); padding:1rem; border-radius:8px; border:1px solid var(--border-color, #2d3748); margin-bottom:1.5rem;">
+              <h4 style="margin-top:0; font-size:0.95rem; margin-bottom:0.75rem;">Atau Dekripsi Berkas config.bin Lokal</h4>
+              <div style="display:flex; flex-wrap:wrap; gap:0.75rem; align-items:center;">
+                <input type="file" id="upload-config-file" accept=".bin" style="font-size:0.85rem; color:var(--text-muted);">
+                <input type="text" id="upload-config-key" placeholder="Kunci AES opsional (jika diketahui)" style="flex:1; min-width:200px; padding:6px 10px; font-size:0.85rem;">
+                <button type="button" id="btn-decrypt-upload" class="btn btn-sm btn-primary">Dekripsi Berkas</button>
+              </div>
+            </div>
+
+            <!-- Decrypt Loading / Result Box -->
+            <div id="decrypt-result-box" style="display:none;">
+              <h4 style="font-size:0.95rem; margin-bottom:0.75rem;">Hasil Ekstraksi Kredensial:</h4>
+              <div id="decrypt-credentials-container"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Tab: Raw JSON -->
       <div id="tab-raw" class="tab-content">
         <div class="card">
@@ -289,6 +856,6 @@
     </main>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=2.2"></script>
 </body>
 </html>

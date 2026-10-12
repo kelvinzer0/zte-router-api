@@ -288,20 +288,58 @@ class ZTEClient:
             page = str(page_html) if not isinstance(page_html, bytes) else page_html.decode("utf-8", "replace")
 
         # Detect model from page HTML if present
-        if "F609" in page:
+        if "F477" in page:
+            self.model = "F477V2"
+        elif "F609" in page:
             self.model = "F609"
         elif "F677" in page:
             self.model = "F677V2"
 
-        # Extract token
-        token_match = re.search(r'Frm_Logintoken"\)\.value\s*=\s*"(\d+)"', page)
+        # Extract token and checktoken
+        token_match = re.search(r'Frm_Logintoken["\']?\)\.value\s*=\s*["\']?(\d+)["\']?', page)
         token = token_match.group(1) if token_match else None
         if not token:
             # Try other patterns
             token_match = re.search(r'Frm_Logintoken.*?value\s*=\s*[\'"](\d+)[\'"]', page, re.I | re.S)
             token = token_match.group(1) if token_match else ("8" if "md5" in page.lower() or True else "4")
 
+        check_match = re.search(r'Frm_Loginchecktoken["\']?\)\.value\s*=\s*["\']?(\d+)["\']?', page)
+        check_token = check_match.group(1) if check_match else None
+
         rnd = random.randint(10000000, 99999999)
+
+        # 1. Try F477V2 / China Unicom style auth if detected or checktoken present
+        if check_token or "_cu_url" in page or self.model == "F477V2":
+            pw_sha = hashlib.sha256((self.password + str(rnd)).encode()).hexdigest()
+            is_admin = self.username.lower() in ("administrator", "admin", "superadmin", "")
+            data_cu = {
+                "Frm_Logintoken": token,
+                "Frm_Loginchecktoken": check_token or "0",
+                "_cu_url": "1" if is_admin else "0",
+                "Right": "1" if is_admin else "2",
+                "Username": "" if is_admin else self.username,
+                "UserRandomNum": str(rnd),
+                "Password": pw_sha,
+                "action": "login",
+            }
+            try:
+                resp = self._post_raw("/", data_cu, referer=f"{self.base_url}/")
+                if resp is not None:
+                    sid = None
+                    for c in self.cookie_jar:
+                        if c.name == "SID":
+                            sid = c.value
+                            break
+                    body_text = resp.decode(enc, "replace")
+                    has_error = "User information is error" in body_text or "username or password" in body_text.lower()
+                    if sid and not has_error:
+                        self._logged_in = True
+                        self.is_gch_device = True
+                        self.session_token = sid
+                        self.model = self.model or "F477V2"
+                        return True
+            except ZTEClientError:
+                pass
 
         # Try MD5 first (common for older models like F609)
         pw_md5 = hashlib.md5((self.password + str(rnd)).encode()).hexdigest()
@@ -338,7 +376,7 @@ class ZTEClient:
         except ZTEClientError:
             pass
 
-        # Try SHA256
+        # Try SHA256 (F677V2)
         pw_sha = hashlib.sha256((self.password + str(rnd)).encode()).hexdigest()
         data_sha = {
             "frashnum": "",
@@ -350,26 +388,57 @@ class ZTEClient:
             "Right": "0",
         }
         resp = self._post_raw("/", data_sha, referer=f"{self.base_url}/")
-        if resp is None:
-            raise ZTEAuthenticationError("Login request failed")
-        body = resp
-        try:
-            body_text = body.decode(enc, "replace")
-        except Exception:
-            body_text = body.decode("utf-8", "replace")
-        sid = None
-        for c in self.cookie_jar:
-            if c.name == "SID":
-                sid = c.value
-                break
-        has_error = "User information is error" in body_text or "username or password" in body_text.lower()
-        if sid and not has_error:
-            self._logged_in = True
-            self.is_gch_device = True
-            self.session_token = sid
-            if not self.model:
-                self.model = "F677V2"
-            return True
+        if resp is not None:
+            body = resp
+            try:
+                body_text = body.decode(enc, "replace")
+            except Exception:
+                body_text = body.decode("utf-8", "replace")
+            sid = None
+            for c in self.cookie_jar:
+                if c.name == "SID":
+                    sid = c.value
+                    break
+            has_error = "User information is error" in body_text or "username or password" in body_text.lower()
+            if sid and not has_error:
+                self._logged_in = True
+                self.is_gch_device = True
+                self.session_token = sid
+                if not self.model:
+                    self.model = "F677V2"
+                return True
+
+        # Fallback: Try F477V2 format if not yet tried
+        if not (check_token or "_cu_url" in page or self.model == "F477V2"):
+            data_cu_fallback = {
+                "Frm_Logintoken": token,
+                "Frm_Loginchecktoken": "0",
+                "_cu_url": "1",
+                "Right": "1",
+                "Username": "",
+                "UserRandomNum": str(rnd),
+                "Password": pw_sha,
+                "action": "login",
+            }
+            try:
+                resp = self._post_raw("/", data_cu_fallback, referer=f"{self.base_url}/")
+                if resp is not None:
+                    sid = None
+                    for c in self.cookie_jar:
+                        if c.name == "SID":
+                            sid = c.value
+                            break
+                    body_text = resp.decode(enc, "replace")
+                    has_error = "User information is error" in body_text or "username or password" in body_text.lower()
+                    if sid and not has_error:
+                        self._logged_in = True
+                        self.is_gch_device = True
+                        self.session_token = sid
+                        self.model = "F477V2"
+                        return True
+            except ZTEClientError:
+                pass
+
         raise ZTEAuthenticationError("Login failed: invalid credentials")
 
     def _login_legacy(self) -> bool:
@@ -722,13 +791,18 @@ class ZTEClient:
                     ('software_version', 'Frm_SoftwareVer'),
                     ('boot_version', 'Frm_BootVer'),
                 ]:
-                    for m in re.finditer(rf'id="{fid}"[^>]*>(.*?)<', text, re.S):
+                    m = re.search(rf'id="{fid}"[^>]*>(.*?)</td>', text, re.S)
+                    if not m:
+                        m = re.search(rf'id="{fid}"[^>]*>(.*?)<', text, re.S)
+                    if m:
                         v = re.sub(r'<[^>]+>', '', m.group(1)).strip()
                         out[k] = _html.unescape(v)
-                        break
                 dev_info = DeviceInfo(**out)
                 if dev_info.model:
-                    self.model = dev_info.model
+                    if "F477" in dev_info.model.upper():
+                        self.model = "F477V2"
+                    else:
+                        self.model = dev_info.model
                 return dev_info
             except Exception as e:
                 raise ZTEClientError(f"Failed to fetch device info: {e}")
@@ -812,7 +886,7 @@ class ZTEClient:
                     except Exception:
                         pass
                 else:
-                    # F677V2 / generic table style
+                    # F677V2 / F477V2 / generic table style
                     try:
                         body = self._request_raw('/getpage.gch?pid=1002&nextpage=status_lan_info_t.gch')
                         if body:
@@ -822,23 +896,23 @@ class ZTEClient:
                                 text = body.decode('utf-8', 'replace')
                             tables = re.findall(r"<table[^>]*>.*?</table>", text, re.DOTALL | re.IGNORECASE)
                             for tbl in tables:
-                                m_name = re.search(r"Ethernet Port\s*</td>\s*<td[^>]*>(LAN\d+)</td>", tbl, re.IGNORECASE)
+                                m_name = re.search(r"(?:Ethernet Port|Port name)\s*</td>\s*<td[^>]*>(LAN\d+)</td>", tbl, re.IGNORECASE)
                                 if not m_name:
                                     continue
                                 name = m_name.group(1).upper()
-                                m_stat = re.search(r"Status\s*</td>\s*<td[^>]*>([^<]+)</td>", tbl, re.IGNORECASE)
+                                m_stat = re.search(r"[Ss]tatus\s*</td>\s*<td[^>]*>([^<]+)</td>", tbl, re.IGNORECASE)
                                 stat_raw = m_stat.group(1).strip() if m_stat else ""
-                                link = "Up" if "up" in stat_raw.lower() else "Down"
+                                link = "Up" if ("up" in stat_raw.lower() or ("connect" in stat_raw.lower() and "not" not in stat_raw.lower())) else "Down"
                                 m_mode = re.search(r"Mode\s*</td>\s*<td[^>]*>([^<]+)</td>", tbl, re.IGNORECASE)
                                 duplex = None
                                 if m_mode:
                                     duplex = "Full" if "full" in m_mode.group(1).lower() else ("Half" if "half" in m_mode.group(1).lower() else None)
                                 m_rate = re.search(r"Rate\s*</td>\s*<td[^>]*>(\d+)", tbl, re.IGNORECASE)
                                 speed = int(m_rate.group(1)) if m_rate else None
-                                m_rx = re.search(r"Packets Received/Bytes Received\s*</td>\s*<td[^>]*>(\d+)/(\d+)</td>", tbl, re.IGNORECASE)
+                                m_rx = re.search(r"(?:Packets Received/Bytes Received|Received packets/bytes)\s*</td>\s*<td[^>]*>(\d+)/(\d+)</td>", tbl, re.IGNORECASE)
                                 pkts_rx = int(m_rx.group(1)) if m_rx else None
                                 bytes_rx = int(m_rx.group(2)) if m_rx else None
-                                m_tx = re.search(r"Packets Sent/Bytes Sent\s*</td>\s*<td[^>]*>(\d+)/(\d+)</td>", tbl, re.IGNORECASE)
+                                m_tx = re.search(r"(?:Packets Sent/Bytes Sent|Transmit packets/bytes)\s*</td>\s*<td[^>]*>(\d+)/(\d+)</td>", tbl, re.IGNORECASE)
                                 pkts_tx = int(m_tx.group(1)) if m_tx else None
                                 bytes_tx = int(m_tx.group(2)) if m_tx else None
                                 ports.append(LANPort(
@@ -963,43 +1037,43 @@ class ZTEClient:
             try:
                 import html as _html
                 conns = []
-                if self.model == "F677V2":
-                    try:
-                        wbody = self._request_raw('/getpage.gch?pid=1002&nextpage=status_ethwan_if_t.gch')
-                        if wbody:
-                            try:
-                                wtext = wbody.decode('gb2312', 'replace')
-                            except Exception:
-                                wtext = wbody.decode('utf-8', 'replace')
-                            tables = re.findall(r"<table[^>]*>.*?</table>", wtext, re.DOTALL | re.IGNORECASE)
-                            for tbl in tables:
-                                if "Connection Name" not in tbl and "WAN MAC" not in tbl:
-                                    continue
-                                pairs = {}
-                                for m in re.finditer(r"<td[^>]*class=[\x27\x22]tdleft[\x27\x22][^>]*>(.*?)</td>\s*<td[^>]*class=[\x27\x22]tdright[\x27\x22][^>]*>(.*?)</td>", tbl, re.DOTALL | re.IGNORECASE):
-                                    k = re.sub(r"<[^>]+>", "", m.group(1)).strip()
-                                    v = _html.unescape(re.sub(r"<[^>]+>", "", m.group(2)).strip())
-                                    pairs[k] = v
-                                if pairs.get("Connection Name") or pairs.get("WAN MAC"):
-                                    c_name = pairs.get("Connection Name") or "WAN"
-                                    u_pppoe, p_pppoe = None, None
-                                    try:
-                                        u_pppoe, p_pppoe = self._get_pppoe_creds_f677v2(len(conns), c_name)
-                                    except Exception:
-                                        pass
-                                    conns.append({
-                                        'name': c_name,
-                                        'connection_type': pairs.get("Type"),
-                                        'ip_address': pairs.get("IP"),
-                                        'gateway': pairs.get("Gateway"),
-                                        'dns_servers': pairs.get("DNS1"),
-                                        'status': pairs.get("Connection Status") or "Connected",
-                                        'mac_address': pairs.get("WAN MAC"),
-                                        'username': u_pppoe,
-                                        'password': p_pppoe,
-                                    })
-                    except Exception:
-                        pass
+                # Check status_ethwan_if_t.gch (F677V2, F477V2, and modern GCH models)
+                try:
+                    wbody = self._request_raw('/getpage.gch?pid=1002&nextpage=status_ethwan_if_t.gch')
+                    if wbody:
+                        try:
+                            wtext = wbody.decode('gb2312', 'replace')
+                        except Exception:
+                            wtext = wbody.decode('utf-8', 'replace')
+                        tables = re.findall(r"<table[^>]*>.*?</table>", wtext, re.DOTALL | re.IGNORECASE)
+                        for tbl in tables:
+                            if "Connection" not in tbl and "WAN MAC" not in tbl:
+                                continue
+                            pairs = {}
+                            for m in re.finditer(r"<td[^>]*class=[\x27\x22]tdleft(?:_\d+)?[\x27\x22][^>]*>(.*?)</td>\s*<td[^>]*class=[\x27\x22]tdright(?:_\d+)?[\x27\x22][^>]*>(.*?)</td>", tbl, re.DOTALL | re.IGNORECASE):
+                                k = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+                                v = _html.unescape(re.sub(r"<[^>]+>", "", m.group(2)).strip())
+                                pairs[k] = v
+                            if pairs.get("Connection Name") or pairs.get("Connection name") or pairs.get("WAN MAC"):
+                                c_name = pairs.get("Connection Name") or pairs.get("Connection name") or "WAN"
+                                u_pppoe, p_pppoe = None, None
+                                try:
+                                    u_pppoe, p_pppoe = self._get_pppoe_creds_f677v2(len(conns), c_name)
+                                except Exception:
+                                    pass
+                                conns.append({
+                                    'name': c_name,
+                                    'connection_type': pairs.get("Type") or pairs.get("mode"),
+                                    'ip_address': pairs.get("IP"),
+                                    'gateway': pairs.get("Gateway"),
+                                    'dns_servers': ", ".join(filter(None, [pairs.get("DNS1"), pairs.get("DNS2")])) or pairs.get("DNS"),
+                                    'status': pairs.get("Connection Status") or "Connected",
+                                    'mac_address': pairs.get("WAN MAC"),
+                                    'username': u_pppoe,
+                                    'password': p_pppoe,
+                                })
+                except Exception:
+                    pass
                 else:
                     try:
                         body = self._request_raw('/getpage.gch?pid=1002&nextpage=IPv46_status_wan2_if_t.gch')
@@ -1147,6 +1221,45 @@ class ZTEClient:
 
         networks = []
 
+        # 0. Try F477V2 style (e8_status_wlan_info_t.gch + net_wlan_secrity_t.gch)
+        if self.model in ("F477V2", "ZXHN F477V2") or self.model != "F609":
+            try:
+                raw_status = self._request_raw("/getpage.gch?pid=1002&nextpage=e8_status_wlan_info_t.gch")
+                if raw_status:
+                    text_status = raw_status.decode("latin1", "replace")
+                    f477_ssids = []
+                    for m in re.finditer(r"Transfer_meaning\s*\(\s*['\"]ESSID(\d+)['\"]\s*,\s*['\"]([^'\"]+)['\"]", text_status):
+                        idx = m.group(1)
+                        name = _unescape(m.group(2))
+                        if name:
+                            f477_ssids.append((idx, name))
+
+                    if f477_ssids:
+                        raw_sec = self._request_raw("/getpage.gch?pid=1002&nextpage=net_wlan_secrity_t.gch")
+                        text_sec = raw_sec.decode("latin1", "replace") if raw_sec else ""
+                        m_pwds = re.findall(r"Transfer_meaning\s*\(\s*['\"]KeyPassphrase['\"]\s*,\s*['\"]([^'\"]+)['\"]", text_sec)
+                        pwd = None
+                        for p in reversed(m_pwds):
+                            up = _unescape(p)
+                            if up:
+                                pwd = up
+                                break
+
+                        for idx, name in f477_ssids:
+                            networks.append({
+                                "ssid": name,
+                                "password": pwd if idx == "0" else None,
+                                "enabled": True,
+                                "band": "2.4G",
+                                "security": "WPA/WPA2-PSK" if (pwd and idx == "0") else "Open",
+                            })
+                        if networks:
+                            if not self.model:
+                                self.model = "F477V2"
+                            return networks
+            except Exception:
+                pass
+
         # 1. Try F677V2 style if model is F677V2 or not F609
         if self.model != "F609":
             try:
@@ -1286,6 +1399,75 @@ class ZTEClient:
         if not valid:
             raise ZTEClientError("Tidak ada jaringan WiFi terdeteksi atau sesi kadaluarsa")
         return valid
+
+    def backup_config(self) -> bytes:
+        """
+        Download router configuration binary (config.bin).
+        """
+        if not self._logged_in:
+            self.login()
+
+        # 1. Try standard GCH config page (F609, F660, F670, etc.)
+        for attempt in range(2):
+            try:
+                time.sleep(0.2)
+                resp = self._request_raw("/getpage.gch?pid=1002&nextpage=manager_dev_config_t.gch")
+                txt = resp.decode("latin1", "replace") if resp else ""
+                m_token = re.search(r'UPLOAD_SESSION_TOKEN.*?value=[\'"]([^\'"]+)[\'"]', txt, re.I)
+                token = m_token.group(1) if m_token else None
+                if token:
+                    time.sleep(0.2)
+                    try:
+                        self._post_raw("/checkSessionToken.gch", {"UPLOAD_ENV": token})
+                    except Exception:
+                        pass
+
+                    m_act = re.search(r'action=[\'"]([^\'"]*(?:pid=101)[^\'"]*)[\'"]', txt)
+                    if m_act:
+                        import html as _html
+                        action = _html.unescape(m_act.group(1))
+                        url = f"{self.base_url}/{action.lstrip('/')}"
+                        boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+                        body = (
+                            f"--{boundary}\r\n"
+                            'Content-Disposition: form-data; name="config"\r\n\r\n'
+                            "\r\n"
+                            f"--{boundary}--\r\n"
+                        ).encode("latin1")
+                        req = Request(
+                            url,
+                            data=body,
+                            headers={
+                                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                                "Referer": f"{self.base_url}/getpage.gch?pid=1002&nextpage=manager_dev_config_t.gch",
+                                "Origin": self.base_url,
+                                "Connection": "close",
+                            },
+                        )
+                        time.sleep(0.2)
+                        with self.opener.open(req, timeout=self.timeout) as r:
+                            data = r.read()
+                            if len(data) > 64:
+                                return data
+            except Exception as e:
+                if attempt == 0:
+                    time.sleep(0.5)
+                    continue
+
+        # 2. Try direct download endpoints
+        for endpoint in [
+            "/getpage.gch?pid=101&nextpage=manager_dev_config_t.gch",
+            "/config.bin",
+            "/backup.bin",
+        ]:
+            try:
+                data = self._request_raw(endpoint)
+                if data and len(data) > 64 and (data[:4] in (b"\x04\x03\x02\x01", b"\x01\x02\x03\x04") or data[:2] == b"\x1f\x8b"):
+                    return data
+            except Exception:
+                pass
+
+        raise ZTEClientError(f"Fitur download konfigurasi (config.bin) tidak didukung atau diblokir pada firmware {self.model or 'router ini'}")
 
     def __enter__(self):
         """Context manager entry"""

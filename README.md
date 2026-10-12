@@ -39,6 +39,19 @@ Sistem secara cerdas mendeteksi varian model router ZTE:
 
 ---
 
+## Definisi Kredensial (Otomatis & Manual)
+
+Sistem mendukung 2 mode autentikasi kredensial baik saat mendaftarkan single router maupun saat pemindaian massal (subnet / CIDR range):
+
+| Mode Kredensial | Target Model | Username | Password | Metode Autentikasi |
+| :--- | :--- | :--- | :--- | :--- |
+| **🤖 Otomatis** | **ZTE F609** | `admin` | `admin` | MD5 + dynamic token/salt |
+| **🤖 Otomatis** | **ZTE F677V2** | `superadmin` | `suportadmin` | SHA256 + dynamic token/salt |
+| **🤖 Otomatis** | **🔍 Deteksi Otomatis** | *Otomatis (sesuai model terdeteksi)* | *Otomatis* | Probe IP cepat untuk menentukan F609 vs F677V2 |
+| **✏️ Manual** | Bebas / Kustom | Sesuai input pengguna | Sesuai input pengguna | Mencoba MD5 (F609) lalu SHA256 (F677V2) |
+
+---
+
 ## Memulai Cepat
 
 ### 1. Menjalankan Langsung (Python Virtualenv)
@@ -95,12 +108,38 @@ Sebelumnya, jika sesi router kedaluwarsa, pengguna mungkin merasa perlu melakuka
 | :--- | :--- | :--- |
 | `GET` | `/routers` | Daftar seluruh router yang terdaftar (tanpa mengekspos password). |
 | `POST` | `/routers` | Menambahkan router baru ke registri. |
+| `POST` | `/routers/scan` | **Scan rentang IP / CIDR** (mis. `10.200.204.0/24`) khusus perangkat **ZTE F609** dan **F677V2** dan daftarkan massal secara otomatis. |
+| `POST` | `/routers/scan-stream` | **Scan rentang IP dengan live SSE stream** untuk monitoring progres dan penemuan perangkat real-time. |
+| `POST` | `/routers/search-ssid` | **Cari SSID di seluruh router**: Temukan di IP mana suatu SSID berada dengan opsi re-auth per router. |
+| `POST` | `/routers/search-ssid-stream` | **Cari SSID dengan live SSE stream**: Pemantauan real-time router-demi-router, IP locator, ekstraksi password WiFi & indikator re-auth. |
+| `GET` | `/routers/backup-csv` | **Backup CSV WiFi**: Ekspor berkas CSV berisi khusus kolom `ip,ssid,password` untuk seluruh router atau router tertentu. |
 | `GET` | `/routers/{router_id}` | Mengambil detail konfigurasi satu router. |
 | `PUT` | `/routers/{router_id}` | Memperbarui router (kosongkan password untuk mempertahankan yang ada). |
 | `DELETE` | `/routers/{router_id}` | Menghapus router dari registri. |
 | `POST` | `/routers/{router_id}/test` | Uji konektivitas & otentikasi cepat dengan metrik latensi ms. |
-| `POST` | `/routers/{router_id}/reauth` | **Paksa login ulang** dan bersihkan sesi kedaluwarsa. |
+| `POST` | `/routers/{router_id}/reauth` | **Paksa login ulang** dan bersihkan sesi kedaluwarsa satu router. |
+| `POST` | `/routers/reauth-all` | **Re-Auth Massal**: Login ulang ke seluruh router sekaligus & perbarui label SSID. |
+| `POST` | `/routers/reauth-all-stream` | **Re-Auth Massal (Live SSE)**: Live streaming progres pembaruan sesi dan label SSID router. |
 | `GET` | `/routers/{router_id}/overview` | Ringkasan terpadu (Device, PON, WiFi, LAN, WAN) dalam satu panggilan. |
+| `GET` | `/routers/{router_id}/backup-config` | **Unduh berkas cadangan `config.bin`** langsung dari router. |
+| `POST` | `/routers/{router_id}/decrypt-config` | **Unduh & dekripsi otomatis `config.bin`** untuk mengekstrak password PPPoE plaintext, WiFi, dan admin. |
+
+### Ekstraksi & Dekripsi Konfigurasi (`config.bin`)
+
+| Method | Endpoint | Deskripsi |
+| :--- | :--- | :--- |
+| `GET` | `/routers/{router_id}/backup-config` | Unduh file cadangan binary `config.bin` router. |
+| `POST` | `/routers/{router_id}/decrypt-config` | Unduh & dekripsi otomatis konfigurasi router target. |
+| `POST` | `/decrypt-config` | Upload dan dekripsi file `config.bin` mandiri secara bebas. |
+
+### Operasi Telnet & sendcmd
+
+| Method | Endpoint | Deskripsi |
+| :--- | :--- | :--- |
+| `GET` | `/routers/{router_id}/telnet/status` | Cek status port Telnet 23 (Terbuka/Tertutup/Latency). |
+| `POST` | `/routers/{router_id}/telnet/enable-factory` | Aktifkan layanan Telnet via protokol ZTE Factory Mode (`/webFac`). |
+| `POST` | `/routers/{router_id}/telnet/extract` | Ekstrak plaintext PPPoE, Web Admin, dan WiFi via `sendcmd`. |
+| `POST` | `/routers/{router_id}/telnet/command` | Eksekusi perintah shell / sendcmd kustom pada router. |
 
 ### Data Status & Ekstraksi Jaringan
 

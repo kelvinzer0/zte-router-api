@@ -28,7 +28,7 @@ DEFAULT_REGISTRY_PATH = os.environ.get(
 )
 
 # Fields accepted from API payloads
-EDITABLE_FIELDS = ("name", "host", "port", "username", "password", "timeout", "location", "notes")
+EDITABLE_FIELDS = ("name", "host", "port", "username", "password", "timeout", "location", "notes", "ssid")
 
 # hostname / IPv4 with optional scheme, port or trailing path
 _HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$")
@@ -193,6 +193,9 @@ def clean_payload(payload: dict, partial: bool = False) -> dict:
     if "notes" in payload or not partial:
         result["notes"] = _as_text(payload.get("notes"), "Catatan", 512)
 
+    if "ssid" in payload or not partial:
+        result["ssid"] = _as_text(payload.get("ssid"), "SSID", 128)
+
     return result
 
 
@@ -209,6 +212,7 @@ class RouterEntry:
     timeout: int = 10
     location: str = ""
     notes: str = ""
+    ssid: str = ""
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -248,6 +252,7 @@ class RouterEntry:
             timeout=int(data.get("timeout") or 10),
             location=_as_text(data.get("location"), "Lokasi", 128),
             notes=_as_text(data.get("notes"), "Catatan", 512),
+            ssid=_as_text(data.get("ssid"), "SSID", 128),
             created_at=str(data.get("created_at") or _now()),
             updated_at=str(data.get("updated_at") or _now()),
         )
@@ -355,6 +360,14 @@ class RouterRegistry:
             raise RouterRegistryError(f"Router '{router_id}' tidak ditemukan")
         return entry
 
+    def find_by_host(self, host: str, port: int = 80) -> Optional[RouterEntry]:
+        """Find an entry by host and port"""
+        with self._lock:
+            for entry in self._entries.values():
+                if entry.host == host and entry.port == port:
+                    return entry
+        return None
+
     def create(self, payload: dict, router_id: Optional[str] = None) -> RouterEntry:
         """Create a new entry"""
         data = clean_payload(payload, partial=False)
@@ -386,6 +399,14 @@ class RouterRegistry:
             self.get(router_id)
             del self._entries[router_id]
             self._save()
+
+    def update_ssid(self, router_id: str, ssid: str) -> None:
+        """Update SSID label for a router and persist to disk"""
+        with self._lock:
+            entry = self._entries.get(router_id)
+            if entry and entry.ssid != str(ssid or "").strip():
+                entry.ssid = str(ssid or "").strip()
+                self._save()
 
     # ---------------------------------------------------------------- helpers
 
